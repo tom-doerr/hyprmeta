@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -295,6 +296,56 @@ class Store:
         self.recent = [new if n == old else n for n in self.recent]
         if old in self.last_used:
             self.last_used[new] = self.last_used.pop(old)
+
+
+def socket_path() -> str:
+    """The resident daemon's command socket."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(runtime, "hyprmeta.sock")
+
+
+def daemon_send(command: str, timeout: float = 0.5) -> str | None:
+    """Send one command to the daemon; None when no daemon is listening."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(socket_path())
+        s.sendall(command.encode())
+        reply = s.recv(256).decode(errors="replace").strip()
+        s.close()
+        return reply
+    except (OSError, socket.timeout):
+        return None
+
+
+def fuzzy_score(query: str, text: str) -> float | None:
+    """Subsequence match score (higher is better), None when `query` is not in `text`.
+
+    Case-insensitive. Rewards a prefix match, contiguous runs and word starts;
+    penalises gaps. Ties are broken by the caller (recency order).
+    """
+    q = query.lower()
+    t = text.lower()
+    if not q:
+        return 0.0
+    score = 0.0
+    pos = 0
+    prev = -2
+    for ch in q:
+        idx = t.find(ch, pos)
+        if idx < 0:
+            return None
+        if idx == 0:
+            score += 10.0  # prefix
+        elif idx == prev + 1:
+            score += 6.0  # contiguous
+        elif t[idx - 1] in " -_./":
+            score += 4.0  # word start
+        score -= max(0, idx - prev - 1) * 0.5  # gap
+        prev = idx
+        pos = idx + 1
+    score -= (len(t) - len(q)) * 0.1  # prefer shorter targets
+    return score
 
 
 def humanize_ago(seconds: float) -> str:
@@ -620,10 +671,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name")
     s.add_argument("--follow", action="store_true", help="switch there afterwards")
 
-    s = sub.add_parser("pick", help="fuzzy-pick a meta workspace via the menu command")
+    s = sub.add_parser("pick", help="open the picker (the resident daemon if running, else the menu command)")
     s.add_argument("--move", action="store_true", help="move the focused window instead of switching")
     s.add_argument("--follow", action="store_true", help="with --move: switch there afterwards")
     s.add_argument("--menu", default=None, help="override the menu command from the config")
+    s.add_argument("--no-daemon", action="store_true", help="always use the menu command")
+
+    sub.add_parser("daemon", help="run the resident GTK picker (global shortcuts hyprmeta:pick / pick-move)")
 
     s = sub.add_parser("goto", help="workspace N relative to the current meta (for Super+N binds)")
     s.add_argument("n", type=int)
@@ -661,6 +715,15 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
     try:
         if args.cmd == "init":
             return cmd_init(args, hypr)
+        if args.cmd == "daemon":
+            from .daemon import run as run_daemon
+
+            return run_daemon()
+        if args.cmd == "pick" and not args.no_daemon:
+            reply = daemon_send("show-move" if args.move else "toggle")
+            if reply is not None:
+                print(f"daemon: {reply}")
+                return 0 if reply in ("ok", "pong") else 1
 
         cfg = Config.load(config_path())
         store_file = state_path()

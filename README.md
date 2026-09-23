@@ -57,7 +57,44 @@ kind of command used to ask for a new meta's name: it receives one hint line
 tints that dialog mint so it never looks like the picker. `{assets}` expands
 to the package's `assets/` directory.
 
-## Hyprland binds
+## The resident picker (recommended): 3–6 ms from keypress to pixels
+
+`hyprmeta daemon` keeps a pre-built GTK layer-shell window alive and registers
+two [Hyprland global shortcuts](https://github.com/hyprwm/hyprland-protocols)
+(`hyprmeta:pick`, `hyprmeta:pick-move`). A keypress is then one Wayland event
+into an already-running process — no shell, no interpreter start, no `hyprctl`.
+Measured on a 120 Hz setup: **3.4–6.3 ms keypress→draw** (the one-shot wofi
+path was ~90 ms plus a 200 ms fade).
+
+```ini
+bind = $mainMod, SPACE, global, hyprmeta:pick             # open (again = close)
+bind = $mainMod SHIFT, SPACE, global, hyprmeta:pick-move  # move the focused window
+```
+
+Run it as a user service (see `contrib/hyprmeta-daemon.service`; it waits for
+`WAYLAND_DISPLAY` like any Wayland daemon started from
+`graphical-session.target`):
+
+```sh
+systemctl --user enable --now hyprmeta-daemon.service
+```
+
+Needs `python3-gi`, `gir1.2-gtklayershell-0.1` and a pipx install that can see
+them: `pipx install --system-site-packages --editable ~/git/hyprmeta`.
+
+Keys inside the picker: type to fuzzy-filter, Up/Down/Tab to move, **Enter**
+switch, **Alt+Enter** move the focused window there, **Shift+Enter** move and
+follow, **Escape** close. With nothing matching, Enter creates a meta named
+after what you typed; the `＋ new meta workspace` row asks for a name. The
+current meta is derived from a monitor snapshot kept fresh through Hyprland's
+event socket, so opening the picker issues no compositor query.
+
+It also listens on `$XDG_RUNTIME_DIR/hyprmeta.sock` (`toggle`, `show`,
+`show-move`, `hide`, `ping`, `quit`); `hyprmeta pick` uses that when the daemon
+is running and falls back to the menu command below otherwise (`--no-daemon`
+forces the menu).
+
+## Menu-command fallback (wofi)
 
 ```ini
 # Use the full path: `exec` binds run with the system PATH, which usually
@@ -66,9 +103,9 @@ bind = $mainMod, SPACE, exec, ~/.local/bin/hyprmeta pick                 # jump 
 bind = $mainMod SHIFT, SPACE, exec, ~/.local/bin/hyprmeta pick --move    # move the focused window there
 ```
 
-Pressing the bind while a picker is open closes it instead of stacking a second
-one (a pid file in `$XDG_RUNTIME_DIR` tracks the running picker's process
-group).
+Pressing the bind while a wofi picker is open closes it instead of stacking a
+second one (a pid file in `$XDG_RUNTIME_DIR` tracks the running picker's
+process group).
 
 ## Frosted-glass look
 
@@ -78,14 +115,15 @@ comes from the compositor. Add a layer rule so Hyprland blurs wofi's surface
 
 ```ini
 layerrule {
-    name = wofi-glass
-    match:namespace = ^wofi$
+    name = hyprmeta-glass
+    match:namespace = ^(hyprmeta|wofi)$   # the daemon, and the wofi fallback
     blur = true
     ignore_alpha = 0.1
+    no_anim = true      # a layersIn fade only adds latency to a picker
 }
 ```
 
-Keep `ignore_alpha` below the pane's alpha (0.24 in `wofi.css`) or the pane is
+Keep `ignore_alpha` below the pane's alpha (0.22 in `wofi.css`) or the pane is
 treated as see-through and gets no blur. Apply with `hyprctl reload
 config-only`, which reloads the config without re-applying monitor modes.
 

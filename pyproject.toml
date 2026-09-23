@@ -5,12 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hyprmeta"
 version = "0.1.0"
-description = "Meta workspaces for Hyprland: a named offset applied to every monitor at once, with a fuzzy picker"
+description = "Meta workspaces for Hyprland: a named offset applied to every monitor at once, with a resident fuzzy picker"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Tom Doerr" }]
-dependencies = []
+dependencies = [
+    "pywayland>=0.4.18",  # daemon: hyprland-global-shortcuts-v1 client
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

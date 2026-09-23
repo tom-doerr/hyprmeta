@@ -54,6 +54,7 @@ def paths(tmp_path, monkeypatch):
     state = tmp_path / "state.json"
     monkeypatch.setenv("HYPRMETA_CONFIG", str(cfg))
     monkeypatch.setenv("HYPRMETA_STATE", str(state))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))  # never talk to a real daemon
     return cfg, state
 
 
@@ -460,3 +461,36 @@ def test_main_pick_new_entry_uses_menu_new_with_the_hint(paths, monkeypatch, cap
     assert calls == [("MAIN", [cli.NEW_ENTRY]), ("NEW", [cli.NEW_HINT])]
     assert capsys.readouterr().out.strip() == "bills: 14 15 16"
     assert json.loads(state.read_text())["metas"] == {"home": 0, "bills": 10}
+
+
+def test_fuzzy_score_orders_sensibly():
+    f = cli.fuzzy_score
+    assert f("", "anything") == 0.0
+    assert f("x", "taxes") is not None and f("q", "taxes") is None
+    # prefix beats mid-word, contiguous beats scattered
+    assert f("tax", "taxes") > f("tax", "syntax")
+    assert f("sec", "security") > f("sec", "s-e-c")
+    assert f("leg", "legal") > f("leg", "l.e.g.a.l")
+    # case-insensitive
+    assert f("TAX", "taxes") == f("tax", "taxes")
+    # shorter target wins on equal structure
+    assert f("home", "home") > f("home", "homework")
+
+
+def test_daemon_send_returns_none_without_a_daemon(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert cli.socket_path() == str(tmp_path / "hyprmeta.sock")
+    assert cli.daemon_send("ping") is None
+
+
+def test_main_pick_uses_the_daemon_when_it_answers(paths, monkeypatch, capsys):
+    cfg, state = paths
+    Config(base=[4, 5, 6]).save(cfg)
+    Store(metas={"home": 0}, recent=["home"]).save(state)
+    sent = []
+    monkeypatch.setattr(cli, "daemon_send", lambda cmd: sent.append(cmd) or "ok")
+    monkeypatch.setattr(cli, "run_menu", lambda *a: (_ for _ in ()).throw(AssertionError("menu must not run")))
+    assert cli.main(["pick"], hypr=Hypr(FakeHyprctl())) == 0
+    assert cli.main(["pick", "--move"], hypr=Hypr(FakeHyprctl())) == 0
+    assert sent == ["toggle", "show-move"]
+    assert "daemon: ok" in capsys.readouterr().out
