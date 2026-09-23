@@ -183,26 +183,57 @@ def test_goto_refuses_when_monitors_disagree(tmp_path):
         app.goto_slot(1)
 
 
-def test_menu_lines_mru_first_with_current_marker(tmp_path):
+def test_menu_lines_most_recently_opened_first_with_age(tmp_path):
     app = make_app(
         FakeHyprctl(active=(14, 15, 16)),
         tmp_path / "s.json",
-        {"home": 0, "taxes": 10, "zeta": 20, "alpha": 30},
-        recent=["taxes", "home"],
+        {"home": 0, "taxes": 10, "zeta": 20, "alpha": 30, "mid": 40},
+        recent=["taxes", "home", "mid"],
     )
-    assert app.menu_lines() == [
-        "●  taxes   14 · 15 · 16",
-        "○  home    4 · 5 · 6",
-        "○  alpha   34 · 35 · 36",
-        "○  zeta    24 · 25 · 26",
+    now = 1_000_000.0
+    app.store.last_used = {"taxes": now - 10, "home": now - 3 * 3600, "zeta": now - 2 * 86400}
+    assert app.menu_lines(now=now) == [
+        "●  taxes   current",
+        "○  home    3 h ago",
+        "○  zeta    2 d ago",
+        "○  mid     never opened",  # legacy `recent` order, before the unknown ones
+        "○  alpha   never opened",
         cli.NEW_ENTRY,
     ]
     assert cli.NEW_ENTRY == "＋  new meta workspace"
 
 
+def test_touch_records_time_and_reorders(tmp_path):
+    store = Store(metas={"a": 0, "b": 10, "c": 20}, recent=[])
+    store.touch("b", now=100.0)
+    store.touch("a", now=200.0)
+    assert store.ordered() == ["a", "b", "c"]
+    store.touch("c", now=300.0)
+    assert store.ordered() == ["c", "a", "b"]
+    assert store.recent == ["c", "a", "b"]
+    store.rename("c", "d")
+    assert store.last_used == {"b": 100.0, "a": 200.0, "d": 300.0}
+    store.remove("d")
+    assert store.ordered() == ["a", "b"]
+    assert "d" not in store.last_used
+
+
+def test_humanize_ago():
+    assert cli.humanize_ago(3) == "just now"
+    assert cli.humanize_ago(-5) == "just now"
+    assert cli.humanize_ago(120) == "2 min ago"
+    assert cli.humanize_ago(89 * 60) == "89 min ago"
+    assert cli.humanize_ago(2 * 3600) == "2 h ago"
+    assert cli.humanize_ago(35 * 3600) == "35 h ago"
+    assert cli.humanize_ago(3 * 86400) == "3 d ago"
+    assert cli.humanize_ago(20 * 86400) == "3 wk ago"
+    assert cli.humanize_ago(100 * 86400) == "3 mo ago"
+    assert cli.humanize_ago(800 * 86400) == "2 yr ago"
+
+
 def test_name_from_line_roundtrips_and_passes_typed_queries_through():
-    assert App.name_from_line("●  taxes   14 · 15 · 16") == "taxes"
-    assert App.name_from_line("○  two words   4 · 5 · 6") == "two words"
+    assert App.name_from_line("●  taxes   current") == "taxes"
+    assert App.name_from_line("○  two words   5 min ago") == "two words"
     assert App.name_from_line("bills") == "bills"
     assert App.name_from_line("  bills \n") == "bills"
 
@@ -215,7 +246,7 @@ def test_resolve_pick_existing_typed_and_new_entry(tmp_path):
         prompts.append(True)
         return "  music "
 
-    assert app.resolve_pick("○  taxes   14 · 15 · 16\n", prompt) == "taxes"
+    assert app.resolve_pick("○  taxes   3 h ago\n", prompt) == "taxes"
     # A typed query that matched nothing becomes a new meta.
     assert app.resolve_pick("bills", prompt) == "bills"
     assert app.store.metas["bills"] == 20
@@ -232,10 +263,12 @@ def test_store_roundtrip_drops_recent_names_that_no_longer_exist(tmp_path):
     p.write_text(json.dumps({"metas": {"home": 0}, "recent": ["gone", "home"]}))
     store = Store.load(p)
     assert store.recent == ["home"]
+    store.touch("home", now=42.0)
     store.rename("home", "base")
     store.save(p)
     assert Store.load(p).metas == {"base": 0}
     assert Store.load(p).recent == ["base"]
+    assert Store.load(p).last_used == {"base": 42.0}
     with pytest.raises(HyprmetaError, match="reserved"):
         store.create(cli.NEW_ENTRY, 10)
     with pytest.raises(HyprmetaError, match="reserved"):
@@ -299,7 +332,7 @@ def test_main_pick_with_fake_menu(paths, monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_menu", fake_menu)
     assert cli.main(["pick", "--menu", "fzf"], hypr=Hypr(fake)) == 0
     assert seen["command"] == "fzf"
-    assert seen["lines"][0] == "●  home    4 · 5 · 6"
+    assert seen["lines"][0] == "●  home    current"
     assert capsys.readouterr().out.strip() == "taxes: 14 15 16"
     assert fake.batches[0][1] == "focusworkspaceoncurrentmonitor 14"
 
@@ -418,6 +451,6 @@ def test_main_pick_new_entry_uses_menu_new_with_the_hint(paths, monkeypatch, cap
     monkeypatch.setattr(cli, "PickerLock", lambda: RealLock(cfg.parent / "pick.pid"))
     fake = FakeHyprctl()
     assert cli.main(["pick"], hypr=Hypr(fake)) == 0
-    assert calls == [("MAIN", ["●  home   4 · 5 · 6", cli.NEW_ENTRY]), ("NEW", [cli.NEW_HINT])]
+    assert calls == [("MAIN", ["●  home   current", cli.NEW_ENTRY]), ("NEW", [cli.NEW_HINT])]
     assert capsys.readouterr().out.strip() == "bills: 14 15 16"
     assert json.loads(state.read_text())["metas"] == {"home": 0, "bills": 10}

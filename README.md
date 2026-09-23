@@ -117,7 +117,11 @@ windowrule {
 
 ## Picker behaviour
 
-- Entries are ordered most-recently-used first; the current one is marked.
+- Entries are ordered by when you last opened them, most recent first; the
+  current one is marked `●`. Each line shows the name and how long ago it was
+  opened (`just now`, `5 min ago`, `3 h ago`, `2 d ago`, …), never the
+  workspace numbers — those are an implementation detail (`hyprmeta list` has
+  them).
 - Selecting `+ new meta workspace` prompts for a name and creates it at the next
   free offset.
 - Typing a name that matches nothing and confirming it also creates it (menus

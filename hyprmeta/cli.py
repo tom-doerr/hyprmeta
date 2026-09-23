@@ -14,6 +14,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -191,10 +192,19 @@ class Config:
 
 @dataclass
 class Store:
-    """Named offsets plus a most-recently-used order."""
+    """Named offsets plus when each one was last opened.
+
+    `recent` is the most-recently-opened order (index 0 = current), kept in
+    sync with `last_used` (epoch seconds) on every `touch`.
+    """
 
     metas: dict[str, int]
     recent: list[str]
+    last_used: dict[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.last_used is None:
+            self.last_used = {}
 
     @classmethod
     def load(cls, path: Path) -> "Store":
@@ -203,12 +213,21 @@ class Store:
         data = json.loads(path.read_text())
         metas = {str(k): int(v) for k, v in data.get("metas", {}).items()}
         recent = [n for n in data.get("recent", []) if n in metas]
-        return cls(metas=metas, recent=recent)
+        last_used = {
+            str(k): float(v) for k, v in data.get("last_used", {}).items() if str(k) in metas
+        }
+        return cls(metas=metas, recent=recent, last_used=last_used)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"metas": self.metas, "recent": self.recent}, indent=2) + "\n")
+        tmp.write_text(
+            json.dumps(
+                {"metas": self.metas, "recent": self.recent, "last_used": self.last_used},
+                indent=2,
+            )
+            + "\n"
+        )
         os.replace(tmp, path)
 
     def offset(self, name: str) -> int:
@@ -225,10 +244,19 @@ class Store:
         return None
 
     def ordered(self) -> list[str]:
-        rest = sorted(n for n in self.metas if n not in self.recent)
-        return [*self.recent, *rest]
+        """Most recently opened first; never-opened ones last, alphabetically."""
+        assert self.last_used is not None
+        used = sorted(
+            (n for n in self.metas if n in self.last_used),
+            key=lambda n: -self.last_used[n],  # type: ignore[index]
+        )
+        legacy = [n for n in self.recent if n in self.metas and n not in self.last_used]
+        rest = sorted(n for n in self.metas if n not in self.last_used and n not in legacy)
+        return [*used, *legacy, *rest]
 
-    def touch(self, name: str) -> None:
+    def touch(self, name: str, now: float | None = None) -> None:
+        assert self.last_used is not None
+        self.last_used[name] = time.time() if now is None else now
         self.recent = [name, *[n for n in self.recent if n != name]]
 
     def next_free_offset(self, step: int) -> int:
@@ -250,11 +278,14 @@ class Store:
         self.metas[name] = offset
 
     def remove(self, name: str) -> None:
+        assert self.last_used is not None
         self.offset(name)
         del self.metas[name]
         self.recent = [n for n in self.recent if n != name]
+        self.last_used.pop(name, None)
 
     def rename(self, old: str, new: str) -> None:
+        assert self.last_used is not None
         new = validate_name(new)
         off = self.offset(old)
         if new in self.metas:
@@ -262,6 +293,31 @@ class Store:
         del self.metas[old]
         self.metas[new] = off
         self.recent = [new if n == old else n for n in self.recent]
+        if old in self.last_used:
+            self.last_used[new] = self.last_used.pop(old)
+
+
+def humanize_ago(seconds: float) -> str:
+    """Coarse, one-unit relative time: `just now`, `5 min ago`, `3 h ago`, `2 d ago`."""
+    s = max(0.0, seconds)
+    if s < 45:
+        return "just now"
+    minutes = round(s / 60)
+    if minutes < 90:
+        return f"{minutes} min ago"
+    hours = round(s / 3600)
+    if hours < 36:
+        return f"{hours} h ago"
+    days = round(s / 86400)
+    if days < 14:
+        return f"{days} d ago"
+    weeks = round(s / 604800)
+    if weeks < 9:
+        return f"{weeks} wk ago"
+    months = round(s / 2629800)
+    if months < 18:
+        return f"{months} mo ago"
+    return f"{round(s / 31557600)} yr ago"
 
 
 def validate_name(name: str) -> str:
@@ -390,16 +446,24 @@ class App:
 
     # -- picker ------------------------------------------------------------ #
 
-    def menu_lines(self) -> list[str]:
-        """One aligned line per meta: `●  taxes     14 · 15 · 16`, MRU first."""
+    def age_label(self, name: str, now: float | None = None) -> str:
+        """`current`, `never opened`, or how long ago it was opened."""
+        assert self.store.last_used is not None
+        ts = self.store.last_used.get(name)
+        if ts is None:
+            return "never opened"
+        return humanize_ago((time.time() if now is None else now) - ts)
+
+    def menu_lines(self, now: float | None = None) -> list[str]:
+        """One aligned line per meta: `●  taxes     current`, most recent first."""
         cur = self.current_name()
         names = self.store.ordered()
         width = max((len(n) for n in names), default=0) + 3
         lines = []
         for name in names:
-            ws = " · ".join(str(w) for w in self.workspaces_for(self.store.metas[name]))
             glyph = GLYPH_CURRENT if name == cur else GLYPH_OTHER
-            lines.append(f"{glyph}  {name:<{width}}{ws}")
+            age = "current" if name == cur else self.age_label(name, now)
+            lines.append(f"{glyph}  {name:<{width}}{age}")
         lines.append(NEW_ENTRY)
         return lines
 
@@ -607,7 +671,8 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             for name in app.store.ordered():
                 ws = " ".join(str(w) for w in app.workspaces_for(app.store.metas[name]))
                 mark = "*" if name == cur else " "
-                print(f"{mark} {name}\t{app.store.metas[name]:>4}\t{ws}")
+                age = "current" if name == cur else app.age_label(name)
+                print(f"{mark} {name}\t{app.store.metas[name]:>4}\t{ws}\t{age}")
             if cur is None:
                 off = app.current_offset()
                 where = "monitors disagree" if off is None else f"offset {off} has no name"
