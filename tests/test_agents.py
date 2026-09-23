@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -256,7 +257,10 @@ def test_apply_tags_diffs_and_batches():
 
 def test_marks_use_unambiguous_glyphs():
     m = ag.marks_markup({"running": 1, "done": 2, "waiting": 1, "idle": 3})
-    assert "⟳1" in m and "✓2" in m and "!1" in m and "○3" in m
+    assert "▶1" in m and "✓2" in m and "!1" in m and "○3" in m
+    assert ag.marks_text({"running": 1, "done": 2, "waiting": 1, "idle": 3}) == "▶1 ✓2 !1 ○3"
+    # one cell each in JetBrains Mono (⟳ fell back to an 11 px glyph vs 8 px cells)
+    assert {g for _, g, _ in ag.MARKS} == {"▶", "✓", "!", "○"}
     assert "·" not in m  # read as a minus sign from a distance
     # unread states are blue: yellow/orange read as warnings (user decision)
     assert ag.COLOR_DONE == ag.COLOR_WAITING == "#89b4fa"
@@ -274,12 +278,16 @@ def test_render_waybar_lines_and_class():
         },
         "current_meta": "home",
     }
-    out = ag.render_waybar(snap, ["home", "taxes", "legal", "empty"])
+    order = ["home", "taxes", "legal", "empty"]
+    out = ag.render_waybar(snap, order)
     lines = out["text"].split("\n")
     assert len(lines) == 4
     assert 'weight="bold"' in lines[0] and "○1" in lines[0]
-    assert "⟳1" in lines[1] and "✓2" in lines[2]
-    assert lines[3].endswith("</span>")
+    assert "▶1" in lines[1] and "✓2" in lines[2]
+    # markers are right-aligned in a column LEFT of the names, names share one column
+    visible = [re.sub(r"<[^>]+>", "", line) for line in lines]
+    assert visible == ["   ○1 home", "▶1 ○1 taxes", "   ✓2 legal", "      empty"]
+    assert {v.index(n) for v, n in zip(visible, order)} == {6}
     assert out["class"] == "attention"
     snap["metas"]["legal"]["done"] = 0
     assert ag.render_waybar(snap, ["taxes"])["class"] == "running"

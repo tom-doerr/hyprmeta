@@ -9,7 +9,8 @@ Trigger paths, fastest first:
   1. Hyprland global shortcuts `hyprmeta:pick` / `hyprmeta:pick-move`
      (`bind = SUPER, SPACE, global, hyprmeta:pick`) — no process spawned.
   2. The Unix socket `$XDG_RUNTIME_DIR/hyprmeta.sock` (`toggle`, `show`,
-     `show-move`, `hide`, `ping`, `quit`) — what `hyprmeta pick` uses.
+     `show-move`, `peek` (show without a keyboard grab), `hide`, `ping`, `quit`)
+     — what `hyprmeta pick` uses.
 
 The current meta is derived from a monitor snapshot kept fresh by Hyprland's
 event socket, so showing the picker issues no hyprctl call.
@@ -33,7 +34,6 @@ from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
 
 from .cli import (  # noqa: E402
     ASSETS,
-    NEW_ENTRY,
     NEW_HINT,
     App,
     Config,
@@ -67,6 +67,8 @@ NAMESPACE = "hyprmeta"
 WIDTH = 560
 MAX_LIST_HEIGHT = 7 * 46
 SEARCH_ICON = "edit-find-symbolic"
+MARKS_GAP = 9  # px between the right-aligned marker column and the name (≈ one space)
+PLUS = "＋"  # sits in the marker column of the create / new rows
 
 # Rows that are labels, not choices (the new-name hint).
 EXTRA_CSS = b"""
@@ -229,7 +231,11 @@ class Picker:
         outer.show_all()
         win.realize()  # build the surface now, not on the first keypress
 
-    def _row(self, css_name: str, text: str, markup: bool = False, **meta: object) -> Gtk.ListBoxRow:
+    def _row(self, css_name: str, text: str, markup: bool = False, marks: str | None = None,
+             **meta: object) -> Gtk.ListBoxRow:
+        """A list row. `marks` (Pango) goes in a right-aligned column LEFT of the text,
+        sized by one SizeGroup per populate: each row's markers sit right against its
+        own name and the names still line up, whatever the glyph widths."""
         row = Gtk.ListBoxRow()
         row.set_name(css_name)
         label = Gtk.Label()
@@ -239,7 +245,18 @@ class Picker:
             label.set_text(text)
         label.set_name("text")
         label.set_xalign(0.0)
-        row.add(label)
+        if marks is None:
+            row.add(label)
+        else:
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=MARKS_GAP)
+            marks_label = Gtk.Label()
+            marks_label.set_markup(marks)
+            marks_label.set_name("text")
+            marks_label.set_xalign(1.0)
+            self._marks_group.add_widget(marks_label)
+            box.pack_start(marks_label, False, False, 0)
+            box.pack_start(label, True, True, 0)
+            row.add(box)
         row.meta = meta  # type: ignore[attr-defined]
         if css_name == "hint":
             row.set_selectable(False)
@@ -249,11 +266,11 @@ class Picker:
     def _populate(self, query: str) -> None:
         for child in self.list.get_children():
             self.list.remove(child)
+        self._marks_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
         if self.mode == "new":
             self.list.add(self._row("hint", NEW_HINT))
         else:
             width = max((len(n) for n, _, _ in self.rows), default=0) + 3
-            age_width = max((len(a) for _, a, _ in self.rows), default=0) + 3
             scored = []
             for i, (name, age, summary) in enumerate(self.rows):
                 score = fuzzy_score(query, name) if query else 0.0
@@ -261,12 +278,11 @@ class Picker:
                     scored.append((-score, i, name, age, summary))
             scored.sort()
             for _, _, name, age, summary in scored:
-                text = GLib.markup_escape_text(f"{name:<{width}}{age:<{age_width}}") + marks_markup(summary)
-                self.list.add(self._row("entry", text.rstrip(), markup=True, name=name))
+                self.list.add(self._row("entry", f"{name:<{width}}{age}", marks=marks_markup(summary), name=name))
             q = query.strip()
             if q and not scored:  # nothing matches: Enter creates a meta with this name
-                self.list.add(self._row("entry", f"＋  create “{q}”", create=q))
-            self.list.add(self._row("entry", NEW_ENTRY, new=True))
+                self.list.add(self._row("entry", f"create “{q}”", marks=PLUS, create=q))
+            self.list.add(self._row("entry", "new meta workspace", marks=PLUS, new=True))
         self.list.show_all()
         first = self.list.get_row_at_index(0)
         if first is not None and first.get_selectable():
@@ -310,6 +326,17 @@ class Picker:
     def hide(self) -> None:
         self.win.hide()
         self.mode = "pick"
+        # a peek() dropped the keyboard grab; every real show must have it back
+        GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.EXCLUSIVE)
+
+    def peek(self) -> None:
+        """Show WITHOUT taking the keyboard — for screenshots and tests.
+
+        A normal show grabs the keyboard exclusively, so an automated screenshot
+        swallows whatever the user is typing at that moment (it happened).
+        """
+        GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
+        self.show()
 
     def toggle(self, move: bool = False, t_press: int | None = None) -> None:
         if self.win.get_visible():
@@ -549,6 +576,8 @@ class CommandServer:
             p.show()
         elif cmd == "show-move":
             p.show(move=True)
+        elif cmd == "peek":
+            p.peek()
         elif cmd == "hide":
             p.hide()
         elif cmd == "ping":

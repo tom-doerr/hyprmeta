@@ -90,9 +90,11 @@ current meta is derived from a monitor snapshot kept fresh through Hyprland's
 event socket, so opening the picker issues no compositor query.
 
 It also listens on `$XDG_RUNTIME_DIR/hyprmeta.sock` (`toggle`, `show`,
-`show-move`, `hide`, `ping`, `quit`); `hyprmeta pick` uses that when the daemon
-is running and falls back to the menu command below otherwise (`--no-daemon`
-forces the menu).
+`show-move`, `peek`, `hide`, `ping`, `quit`). `peek` shows the picker without
+taking the keyboard, for screenshots and tests: a normal show grabs every
+keystroke, including whatever someone is typing at that moment. `hyprmeta pick`
+uses the socket when the daemon is running and falls back to the menu command
+below otherwise (`--no-daemon` forces the menu).
 
 ## Agent status: which terminals run Claude Code / Codex, and who needs a look
 
@@ -120,14 +122,20 @@ It shows up in three places, with the same markers everywhere:
 
 | marker | meaning |
 |---|---|
-| `⟳N` | N agents working |
+| `▶N` | N agents working |
 | `✓N` | N windows whose agent finished (or died) since you last focused them |
 | `!N` | N windows whose agent stopped to wait for you (e.g. an approval) |
 | `○N` | N agents idle, nothing new |
 
-1. **Picker rows**: the marks follow the name and age.
+Every marker glyph exists in JetBrains Mono, so each is exactly one cell wide.
+That keeps the sidebar's name column straight. A fallback glyph such as `⟳`
+renders 3 px wider and shifts its row.
+
+1. **Picker rows**: the marks sit in a right-aligned column directly left of
+   each name, so they read as belonging to it.
 2. **A waybar sidebar**: `hyprmeta agents --waybar --follow` as a custom module
-   prints one line per meta, with the current one in bold. Its class is
+   prints one line per meta (markers right-aligned before the name, current
+   meta in bold). Its class is
    `attention`, `running` or `idle` for CSS. See `contrib/waybar-meta.jsonc`.
 3. **Window borders**: the daemon tags terminals `agent-done` / `agent-running`
    (`tagwindow`, diffed every 2 s against the tags Hyprland really has) and

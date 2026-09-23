@@ -477,41 +477,58 @@ def _esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# Every glyph must exist in JetBrains Mono so it is exactly one cell wide: the
+# sidebar right-aligns markers with spaces, and a fallback-font glyph (⟳ is 11 px
+# against an 8 px cell at 13 px) would shove that row's name out of its column.
+MARKS = (
+    ("running", "▶", COLOR_RUNNING),
+    ("done", "✓", COLOR_DONE),
+    ("waiting", "!", COLOR_WAITING),
+    ("idle", "○", COLOR_IDLE),
+)
+LEGEND = "▶ working   ✓ finished since you focused it   ! waiting for you   ○ idle"
+
+
+def marks_parts(m: dict) -> list[tuple[str, str]]:
+    """(visible text, colour) per non-zero category, in display order."""
+    return [(f"{glyph}{m[key]}", color) for key, glyph, color in MARKS if m.get(key)]
+
+
+def marks_text(m: dict) -> str:
+    """The markers as plain text — its len() is their width in cells."""
+    return " ".join(text for text, _ in marks_parts(m))
+
+
 def marks_markup(m: dict) -> str:
-    """Pango: ⟳N running · ✓N finished unseen · !N waiting for you · ○N idle."""
-    parts = []
-    for key, glyph, color in (
-        ("running", "⟳", COLOR_RUNNING),
-        ("done", "✓", COLOR_DONE),
-        ("waiting", "!", COLOR_WAITING),
-        ("idle", "○", COLOR_IDLE),
-    ):
-        if m.get(key):
-            parts.append(f'<span foreground="{color}">{glyph}{m[key]}</span>')
-    return " ".join(parts)
+    """Pango: ▶N working · ✓N finished unseen · !N waiting for you · ○N idle."""
+    return " ".join(f'<span foreground="{color}">{_esc(text)}</span>' for text, color in marks_parts(m))
 
 
 def render_waybar(snapshot: dict, order: list[str]) -> dict:
-    """One line per meta: name (current one bold) + its agent marks."""
+    """One line per meta: markers right-aligned in a column, then the name.
+
+    Right-aligning puts each row's markers directly against its own name while
+    the names still form one column (user request: see what belongs to what).
+    """
     metas = snapshot.get("metas", {})
     current = snapshot.get("current_meta")
-    width = max((len(n) for n in order), default=4)
+    col = max((len(marks_text(metas.get(n, {}))) for n in order), default=0)
     lines, tips = [], []
     attention = running = False
     for name in order:
         m = metas.get(name, {})
-        label = _esc(f"{name:<{width}}")
         if name == current:
-            label = f'<span foreground="{COLOR_CURRENT}" weight="bold">{label}</span>'
+            label = f'<span foreground="{COLOR_CURRENT}" weight="bold">{_esc(name)}</span>'
         else:
-            label = f'<span foreground="{COLOR_DIM}">{label}</span>'
-        lines.append(f"{label}  {marks_markup(m)}".rstrip())
+            label = f'<span foreground="{COLOR_DIM}">{_esc(name)}</span>'
+        pad = " " * (col - len(marks_text(m)))
+        lines.append(f"{pad}{marks_markup(m)}{' ' if col else ''}{label}")
         attention = attention or bool(m.get("done") or m.get("waiting"))
         running = running or bool(m.get("running"))
         tips.append(
-            f"{name}: {m.get('running', 0)} running, {m.get('done', 0)} finished unseen, "
+            f"{name}: {m.get('running', 0)} working, {m.get('done', 0)} finished unseen, "
             f"{m.get('waiting', 0)} waiting, {m.get('idle', 0)} idle ({m.get('windows', 0)} windows)"
         )
-    tips.append("⟳ running   ✓ finished since you focused it   ! waiting for you   ○ idle")
+    tips.append(LEGEND)
     cls = "attention" if attention else ("running" if running else "idle")
     return {"text": "\n".join(lines), "tooltip": "\n".join(tips), "class": cls}
