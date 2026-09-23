@@ -94,35 +94,71 @@ It also listens on `$XDG_RUNTIME_DIR/hyprmeta.sock` (`toggle`, `show`,
 is running and falls back to the menu command below otherwise (`--no-daemon`
 forces the menu).
 
-## Agent status: which terminals run Claude Code / Codex, and who finished
+## Agent status: which terminals run Claude Code / Codex, and who needs a look
 
-The daemon also tracks coding agents per terminal window, with no hooks:
+The daemon also tracks coding agents per terminal window, with no hooks. Both
+agents publish their state in the **terminal title**, and Hyprland delivers every
+title change as an event, so no polling is involved:
 
-- **Claude Code** rewrites the terminal title: `✳ …` while idle, a spinner
-  glyph (`◑`, braille) while working.
-- **Codex** keeps its rollout `.jsonl` open; its tail carries `task_started`,
-  `task_complete` and `turn_aborted`.
-- `/proc` ancestry ties each agent pid to the ghostty window Hyprland reports.
+| agent | working | stopped |
+|---|---|---|
+| Claude Code | `◐◓◑◒` spinner prefix | `✳ <topic>` |
+| Codex | braille spinner `⠋⠙⠹…` | `<task> \| <dir>` (idle), `[ ! ] Action Required \| …` (waiting for approval) |
 
-An agent going running → idle (or exiting while running) stamps its window as
-*finished*. A window stays **unseen** until it is focused again; a meta
-workspace stays **unseen** until it is the one on screen. That state shows up
-in three places:
+When a Codex title says nothing, the newest rollout `.jsonl` the process holds
+open decides (`task_started` / `task_complete`). `/proc` ancestry ties each agent
+to its terminal window; Codex's `codex-linux-sandbox` helpers are skipped.
 
-1. **The picker rows**: `⟳2` agents running, `✓1` finished since you looked,
-   `·3` idle agents.
-2. **A waybar sidebar** (`hyprmeta agents --waybar --follow` as a custom
-   module; one line per meta, current one bold, class `attention` / `running`
-   / `idle` for CSS). See `contrib/waybar-meta.jsonc`.
-3. **Window borders**: the daemon tags terminals `agent-running` / `agent-done`
-   (`tagwindow`), and two window rules paint them:
+**"Finished since you looked":** an agent seen working whose state then stays
+stopped for 3 s (title flicker never counts), or that exits while working,
+flags its window. The flag stays until **that window gets keyboard focus**;
+switching to its workspace does not clear it. A window you were focused on when
+its agent finished is never flagged, and an agent that starts working again
+hides the flag until it stops again.
+
+It shows up in three places, with the same markers everywhere:
+
+| marker | meaning |
+|---|---|
+| `⟳N` | N agents working |
+| `✓N` | N windows whose agent finished (or died) since you last focused them |
+| `!N` | N windows whose agent stopped to wait for you (e.g. an approval) |
+| `○N` | N agents idle, nothing new |
+
+1. **Picker rows**: the marks follow the name and age.
+2. **A waybar sidebar**: `hyprmeta agents --waybar --follow` as a custom module
+   prints one line per meta, with the current one in bold. Its class is
+   `attention`, `running` or `idle` for CSS. See `contrib/waybar-meta.jsonc`.
+3. **Window borders**: the daemon tags terminals `agent-done` / `agent-running`
+   (`tagwindow`, diffed every 2 s against the tags Hyprland really has) and
+   window rules paint them:
 
 ```ini
-windowrule { name = agent-done;    match:tag = agent-done;    border_color = rgb(f9e2af) rgb(b8a35a) }
-windowrule { name = agent-running; match:tag = agent-running; border_color = rgb(a6e3a1) rgb(5f8a5c) }
+# Hyprland 0.52 has three bugs in border_color rules: a block value loses its
+# first token, the gradient form never fills the inactive colours, and the
+# two-colour form never un-sets when the tag goes away. Two rules per tag,
+# in this order, work around all three:
+windowrule {
+    name = agent-done
+    match:tag = agent-done
+    border_color = v0.52-drops-this rgb(f9e2af) rgb(fab387)   # active, inactive
+}
+windowrule {
+    name = agent-done-revert
+    match:tag = agent-done
+    border_color = v0.52-drops-this rgb(f9e2af)               # records the tag dependency
+}
+# … the same pair for agent-running (e.g. rgba(33ccffee) rgba(a6e3a1bb)).
+# On a Hyprland whose parser is fixed: one rule per tag, no placeholder token.
 ```
 
-`hyprmeta agents` prints the raw snapshot (`$XDG_RUNTIME_DIR/hyprmeta/agents.json`).
+Check a rule without looking at the screen:
+`hyprctl getprop address:<window> inactive_border_color`.
+`hyprmeta agents` prints the raw snapshot (`$XDG_RUNTIME_DIR/hyprmeta/agents.json`);
+the daemon logs every finish (`journalctl --user -u hyprmeta-daemon | grep finished:`).
+
+Not covered: agents inside tmux, or over ssh. Their processes do not descend
+from the terminal window.
 
 ## Menu-command fallback (wofi)
 

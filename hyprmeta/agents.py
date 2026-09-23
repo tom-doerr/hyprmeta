@@ -1,38 +1,66 @@
-"""Agent tracking: which terminals run Claude Code / Codex, and whether they finished.
+"""Agent tracking: which terminals run Claude Code / Codex, and which need a look.
 
-Signals (no hooks needed):
-- Claude Code rewrites the terminal title: `✳ <summary>` while idle, a spinner
-  glyph (◐◓◑◒ / braille ⠏…) while working.
-- Codex keeps its rollout `.jsonl` open; its tail carries `task_started`,
-  `task_complete` and `turn_aborted` events.
-- Process ancestry (`/proc`) ties an agent pid to the ghostty window pid that
-  Hyprland reports in `hyprctl clients -j`.
+Signals, cheapest first (no hooks):
 
-"Finished since you looked": an agent going running → idle (or exiting while
-running) stamps `finish_ts` on its window. A window is `unseen` while
-`finish_ts > last_focus_ts`; a meta workspace is `unseen` while any of its
-windows has `finish_ts > seen_ts`, where `seen_ts` is the last time that meta
-was the one on screen.
+* The terminal TITLE. Both agents write their state into it, and Hyprland
+  delivers every change as a `windowtitlev2` event, so this needs no polling.
+
+  ===========  ==========================  ====================================
+  agent        working                     stopped
+  ===========  ==========================  ====================================
+  Claude Code  `◐◓◑◒` spinner prefix        `✳ <topic>`
+  Codex        braille spinner `⠋⠙⠹…`      `<task> | <dir>` (idle) or
+                                           `[ ! ] Action Required | …` (waiting)
+  ===========  ==========================  ====================================
+
+* Codex fallback when its title says nothing: the NEWEST rollout `.jsonl` among
+  the files the process holds open (`/proc/<pid>/fd` — a process holds several,
+  including stale sessions); its last task event decides.
+* `/proc` parent chains tie agent pids to the ghostty window pid that
+  `hyprctl clients -j` reports. Codex's `codex-linux-sandbox` helpers share the
+  `codex` comm and are skipped; several processes of one kind in one window are
+  one agent.
+
+Attention ("finished since you looked"): an agent seen RUNNING whose state then
+stays idle/waiting for `IDLE_CONFIRM_S` (so title flicker never counts), or that
+exits, stamps its window with `finish_ts`. The window needs attention while that
+stamp is newer than the last moment the window had keyboard focus, it is not
+focused right now, and nothing in it runs again. Only focus clears it — merely
+showing its workspace does not.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
-from .cli import Hypr, HyprmetaError
+from .cli import Hypr
 
+IDLE_CONFIRM_S = 3.0
 AGENT_COMMS = {"claude": "claude", "codex": "codex"}
-IDLE_GLYPHS = {"✳"}
-SPINNER_GLYPHS = set("◐◓◑◒◴◵◶◷") | {chr(c) for c in range(0x2800, 0x2900)}  # braille
-CODEX_RUNNING = {"task_started", "user_message"}
-CODEX_IDLE = {"task_complete", "turn_aborted"}
+CLAUDE_IDLE = "✳"
+# Claude's title spinner, its in-TUI spinner glyphs (defensive), Codex's braille.
+SPINNERS = frozenset("◐◓◑◒✢✶✻✽") | frozenset(chr(c) for c in range(0x2801, 0x2900))
+ACTION_REQUIRED = re.compile(r"^\[\s*\S\s*\]\s*Action Required")
+CODEX_IDLE_TITLE = re.compile(r"^[^|]*\S \| \S")
+CODEX_RUNNING_EVENTS = frozenset({"task_started", "user_message"})
+CODEX_STOPPED_EVENTS = frozenset({"task_complete", "turn_aborted"})
+
 TAG_DONE = "agent-done"
 TAG_RUNNING = "agent-running"
+OUR_TAGS = frozenset({TAG_DONE, TAG_RUNNING})
+
+COLOR_RUNNING = "#a6e3a1"
+COLOR_DONE = "#f9e2af"
+COLOR_WAITING = "#fab387"
+COLOR_IDLE = "#9399b2"
+COLOR_DIM = "#7f849c"
+COLOR_CURRENT = "#cdd6f4"
 
 
 def agents_file() -> Path:
@@ -45,20 +73,24 @@ def agents_file() -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def claude_state_from_title(title: str) -> str | None:
-    """'running' / 'idle' from a Claude Code window title, None if not Claude's."""
-    if not title:
+def title_state(kind: str, title: str) -> str | None:
+    """`running` / `idle` / `waiting` from an agent's terminal title, None if it says nothing."""
+    t = title.strip()
+    if not t:
         return None
-    first = title[0]
-    if first in SPINNER_GLYPHS:
+    if t[0] in SPINNERS:
         return "running"
-    if first in IDLE_GLYPHS:
+    if ACTION_REQUIRED.match(t):
+        return "waiting"
+    if kind == "claude" and t[0] == CLAUDE_IDLE:
+        return "idle"
+    if kind == "codex" and CODEX_IDLE_TITLE.match(t):
         return "idle"
     return None
 
 
 def codex_state_from_rollout_tail(tail: str) -> str | None:
-    """'running' / 'idle' from the last task events in a rollout tail; None if none seen."""
+    """`running` / `idle` from the last task event in a rollout tail; None if none seen."""
     state = None
     for line in tail.splitlines():
         if '"event_msg"' not in line:
@@ -68,9 +100,9 @@ def codex_state_from_rollout_tail(tail: str) -> str | None:
         except (ValueError, AttributeError):
             continue
         kind = payload.get("type")
-        if kind in CODEX_RUNNING:
+        if kind in CODEX_RUNNING_EVENTS:
             state = "running"
-        elif kind in CODEX_IDLE:
+        elif kind in CODEX_STOPPED_EVENTS:
             state = "idle"
     return state
 
@@ -92,15 +124,14 @@ def parent_of(pid: int) -> int | None:
     stat = _read(f"/proc/{pid}/stat")
     if not stat:
         return None
-    # comm can contain spaces; ppid is the 4th field after the ')'
-    try:
+    try:  # comm may contain spaces; ppid is the 2nd field after the closing ')'
         return int(stat[stat.rindex(")") + 2 :].split()[1])
     except (ValueError, IndexError):
         return None
 
 
 def find_agent_processes() -> list[tuple[int, str]]:
-    """(pid, kind) for every claude/codex process on the box."""
+    """(pid, kind) for every claude/codex process, without Codex sandbox helpers."""
     out = []
     try:
         entries = os.listdir("/proc")
@@ -110,15 +141,18 @@ def find_agent_processes() -> list[tuple[int, str]]:
         if not name.isdigit():
             continue
         comm = _read(f"/proc/{name}/comm")
-        if comm is None:
+        kind = AGENT_COMMS.get(comm.strip()) if comm else None
+        if kind is None:
             continue
-        kind = AGENT_COMMS.get(comm.strip())
-        if kind:
-            out.append((int(name), kind))
+        if kind == "codex":
+            argv0 = (_read(f"/proc/{name}/cmdline") or "").split("\0", 1)[0]
+            if os.path.basename(argv0).startswith("codex-linux-sandbox"):
+                continue
+        out.append((int(name), kind))
     return out
 
 
-def window_pid_for(pid: int, window_pids: set[int], max_depth: int = 12) -> int | None:
+def window_pid_for(pid: int, window_pids: set[int], max_depth: int = 14) -> int | None:
     """Walk up the parent chain until we hit a pid Hyprland knows as a window."""
     cur: int | None = pid
     for _ in range(max_depth):
@@ -130,34 +164,49 @@ def window_pid_for(pid: int, window_pids: set[int], max_depth: int = 12) -> int 
     return None
 
 
-def codex_rollout_path(pid: int) -> str | None:
+def _codex_rollouts(pid: int) -> list[str]:
     try:
         fds = os.listdir(f"/proc/{pid}/fd")
     except OSError:
-        return None
+        return []
+    out = []
     for fd in fds:
         try:
             target = os.readlink(f"/proc/{pid}/fd/{fd}")
         except OSError:
             continue
         if "/.codex/sessions/" in target and target.endswith(".jsonl"):
-            return target
-    return None
+            out.append(target)
+    return out
 
 
-def codex_state(pid: int, tail_bytes: int = 65536) -> str | None:
-    path = codex_rollout_path(pid)
-    if path is None:
+def codex_rollout_state(pids: Iterable[int], tail_bytes: int = 65536) -> str | None:
+    best, best_mtime = None, -1.0
+    for pid in pids:
+        for path in _codex_rollouts(pid):
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best, best_mtime = path, mtime
+    if best is None:
         return None
     try:
-        with open(path, "rb") as f:
+        with open(best, "rb") as f:
             f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - tail_bytes))
+            f.seek(max(0, f.tell() - tail_bytes))
             tail = f.read().decode(errors="replace")
     except OSError:
         return None
     return codex_state_from_rollout_tail(tail)
+
+
+def default_state_of(kind: str, pids: list[int], title: str) -> str | None:
+    state = title_state(kind, title)
+    if state is None and kind == "codex":
+        state = codex_rollout_state(pids)
+    return state
 
 
 # --------------------------------------------------------------------------- #
@@ -167,9 +216,11 @@ def codex_state(pid: int, tail_bytes: int = 65536) -> str | None:
 
 @dataclass
 class Agent:
-    pid: int
     kind: str  # claude | codex
-    state: str | None  # running | idle | None (unknown)
+    pids: list[int]
+    state: str | None = None  # running | idle | waiting | None (title says nothing)
+    since: float = 0.0  # when `state` began
+    armed: bool = False  # seen running; a stable stop (or exit) counts as a finish
 
 
 @dataclass
@@ -179,37 +230,42 @@ class WindowState:
     workspace: int
     title: str
     meta: str | None
-    agents: list[Agent] = field(default_factory=list)
-    last_focus_ts: float = 0.0
+    agents: dict[str, Agent] = field(default_factory=dict)  # by kind
+    last_focus_ts: float = 0.0  # last moment this window had keyboard focus
     finish_ts: float = 0.0
-    finished_by: str | None = None  # kind of the agent that finished last
+    finished_by: str | None = None
+    finish_state: str | None = None  # idle | waiting | exited
 
     @property
     def running(self) -> int:
-        return sum(1 for a in self.agents if a.state == "running")
+        return sum(1 for a in self.agents.values() if a.state == "running")
 
-    @property
-    def unseen(self) -> bool:
-        return self.finish_ts > self.last_focus_ts
+
+StateOf = Callable[[str, list[int], str], "str | None"]
 
 
 class AgentTracker:
-    """Pure bookkeeping; the daemon feeds it clients lists, focus events and time."""
+    """Pure bookkeeping; the daemon feeds it clients, focus/title events and time."""
 
-    def __init__(self, base: list[int], metas: dict[str, int], now: float | None = None) -> None:
-        self.base = base
+    def __init__(self, base: list[int], metas: dict[str, int], now: float | None = None,
+                 confirm_s: float = IDLE_CONFIRM_S) -> None:
+        self.base = list(base)
         self.metas = dict(metas)
+        self.confirm_s = confirm_s
         self.windows: dict[str, WindowState] = {}
-        self.seen_ts: dict[str, float] = {}  # meta -> last time it was on screen
+        self.focused: str | None = None
         self.current_meta: str | None = None
         self.started = time.time() if now is None else now
+        self.events: list[str] = []  # human-readable finish log lines, drained by the daemon
 
     # -- configuration -------------------------------------------------------
     def set_metas(self, metas: dict[str, int]) -> None:
         self.metas = dict(metas)
+        for w in self.windows.values():
+            w.meta = self.meta_for_workspace(w.workspace)
 
     def meta_for_workspace(self, ws: int) -> str | None:
-        for i, b in enumerate(self.base):
+        for b in self.base:
             off = ws - b
             if off < 0:
                 continue
@@ -218,137 +274,183 @@ class AgentTracker:
                     return name
         return None
 
+    # -- the state machine ----------------------------------------------------
+    def _observe(self, w: WindowState, a: Agent, state: str | None, now: float) -> None:
+        if state != a.state:
+            a.state, a.since = state, now
+        if state == "running":
+            a.armed = True
+        self._confirm(w, a, now)
+
+    def _confirm(self, w: WindowState, a: Agent, now: float) -> None:
+        if a.armed and a.state in ("idle", "waiting") and now - a.since >= self.confirm_s:
+            a.armed = False
+            self._stamp(w, a.kind, a.state, a.since)
+
+    def _stamp(self, w: WindowState, kind: str, how: str, ts: float) -> None:
+        w.finish_ts = max(w.finish_ts, ts)
+        w.finished_by, w.finish_state = kind, how
+        self.events.append(f"{kind} {how} in {w.address} (ws {w.workspace}, meta {w.meta}): {w.title[:60]!r}")
+
+    def needs_attention(self, w: WindowState) -> bool:
+        return w.finish_ts > w.last_focus_ts and w.address != self.focused and w.running == 0
+
     # -- inputs -------------------------------------------------------------
-    def focus(self, address: str, now: float) -> None:
+    def focus(self, address: str | None, now: float) -> None:
+        """Keyboard focus moved. Both the window left and the one entered count as seen now."""
+        if address == self.focused:
+            return
+        prev = self.windows.get(self.focused) if self.focused else None
+        if prev is not None:
+            prev.last_focus_ts = now
+        self.focused = address
+        cur = self.windows.get(address) if address else None
+        if cur is not None:
+            cur.last_focus_ts = now
+
+    def set_title(self, address: str, title: str, now: float) -> None:
+        """Fast path for `windowtitlev2`: re-derive title-based states, no /proc or hyprctl."""
         w = self.windows.get(address)
-        if w is not None:
-            w.last_focus_ts = now
+        if w is None:
+            return
+        w.title = title
+        for a in w.agents.values():
+            state = title_state(a.kind, title)
+            if state is not None:
+                self._observe(w, a, state, now)
 
-    def set_current_meta(self, name: str | None, now: float) -> None:
-        self.current_meta = name
-        if name is not None:
-            self.seen_ts[name] = now
+    def set_current_meta(self, name: str | None) -> None:
+        self.current_meta = name  # display only; showing a meta clears nothing
 
-    def update(self, clients: Iterable[dict], agents: list[tuple[int, str]], now: float,
-               state_of=None) -> bool:
-        """Rebuild window/agent state from a `hyprctl clients -j` list.
+    def tick(self, now: float) -> None:
+        for w in self.windows.values():
+            for a in w.agents.values():
+                self._confirm(w, a, now)
 
-        `agents` = [(pid, kind)], `state_of(kind, pid, title)` -> state.
-        Returns True when anything user-visible changed.
-        """
+    def update(self, clients: Iterable[dict], agents: Iterable[tuple[int, str]], now: float,
+               state_of: StateOf | None = None) -> None:
+        """Full rebuild from `hyprctl clients -j` + the agent process list."""
         state_of = state_of or default_state_of
-        before = self.snapshot()
-        window_pids = {}
-        seen_addrs = set()
+        present: dict[str, WindowState] = {}
+        focused = self.focused
         for c in clients:
             addr = str(c.get("address"))
-            pid = int(c.get("pid") or 0)
             ws = int((c.get("workspace") or {}).get("id") or 0)
+            pid = int(c.get("pid") or 0)
             title = str(c.get("title") or "")
-            seen_addrs.add(addr)
-            window_pids[pid] = addr
             w = self.windows.get(addr)
             if w is None:
-                w = WindowState(addr, pid, ws, title, self.meta_for_workspace(ws), last_focus_ts=self.started)
-                self.windows[addr] = w
-            else:
-                w.pid, w.workspace, w.title = pid, ws, title
-                w.meta = self.meta_for_workspace(ws)
+                w = self.windows[addr] = WindowState(addr, pid, ws, title, None, last_focus_ts=now)
+            w.pid, w.workspace, w.title = pid, ws, title
+            w.meta = self.meta_for_workspace(ws)
+            present[addr] = w
+            if c.get("focusHistoryID") == 0:
+                focused = addr
         for addr in list(self.windows):
-            if addr not in seen_addrs:
+            if addr not in present:
                 del self.windows[addr]
+        self.focus(focused, now)  # sync with the compositor in case an event was missed
 
-        # attach agents to windows
-        by_window: dict[str, list[Agent]] = {addr: [] for addr in self.windows}
+        by_pid = {w.pid: addr for addr, w in present.items()}
+        grouped: dict[str, dict[str, list[int]]] = {}
         for pid, kind in agents:
-            wpid = window_pid_for(pid, set(window_pids))
-            if wpid is None:
-                continue
-            addr = window_pids[wpid]
-            by_window[addr].append(Agent(pid, kind, state_of(kind, pid, self.windows[addr].title)))
-        for addr, new_agents in by_window.items():
-            w = self.windows[addr]
-            old = {a.pid: a for a in w.agents}
-            for a in new_agents:
-                prev = old.get(a.pid)
-                if prev is not None and prev.state == "running" and a.state == "idle":
-                    w.finish_ts, w.finished_by = now, a.kind
-            for pid, prev in old.items():  # exited while running counts as finished/stopped
-                if prev.state == "running" and pid not in {a.pid for a in new_agents}:
-                    w.finish_ts, w.finished_by = now, prev.kind
-            w.agents = new_agents
-        return self.snapshot() != before
+            wpid = window_pid_for(pid, set(by_pid))
+            if wpid is not None:
+                grouped.setdefault(by_pid[wpid], {}).setdefault(kind, []).append(pid)
+        for addr, w in self.windows.items():
+            kinds = grouped.get(addr, {})
+            for kind in [k for k in w.agents if k not in kinds]:
+                if w.agents[kind].armed:  # died or quit while working
+                    self._stamp(w, kind, "exited", now)
+                del w.agents[kind]
+            for kind, pids in kinds.items():
+                a = w.agents.get(kind)
+                if a is None:
+                    a = w.agents[kind] = Agent(kind, sorted(pids), None, now)
+                a.pids = sorted(pids)
+                self._observe(w, a, state_of(kind, a.pids, w.title), now)
 
     # -- outputs ------------------------------------------------------------
-    def meta_summary(self) -> dict[str, dict]:
-        out: dict[str, dict] = {
-            name: {"running": 0, "unseen": 0, "agents": 0, "windows": 0} for name in self.metas
-        }
+    def meta_summary(self) -> dict[str, dict[str, int]]:
+        keys = ("running", "done", "waiting", "idle", "agents", "windows")
+        out = {name: dict.fromkeys(keys, 0) for name in self.metas}
         for w in self.windows.values():
-            if w.meta is None or w.meta not in out:
+            m = out.get(w.meta) if w.meta else None
+            if m is None:
                 continue
-            m = out[w.meta]
             m["windows"] += 1
             m["agents"] += len(w.agents)
             m["running"] += w.running
-            if w.finish_ts > self.seen_ts.get(w.meta, self.started):
-                m["unseen"] += 1
+            if self.needs_attention(w):
+                waiting = any(a.state == "waiting" for a in w.agents.values())
+                m["waiting" if waiting else "done"] += 1
+            else:
+                m["idle"] += len(w.agents) - w.running
         return out
-
-    def snapshot(self) -> dict:
-        return {
-            "metas": self.meta_summary(),
-            "windows": {
-                addr: {
-                    **asdict(w),
-                    "running": w.running,
-                    "unseen": w.unseen,
-                }
-                for addr, w in self.windows.items()
-                if w.agents or w.finish_ts
-            },
-            "current_meta": self.current_meta,
-        }
 
     def tags_wanted(self) -> dict[str, set[str]]:
-        """address -> tags that should be on that window."""
-        out = {}
+        out: dict[str, set[str]] = {}
         for addr, w in self.windows.items():
-            tags = set()
-            if w.unseen:
-                tags.add(TAG_DONE)
-            if w.running:
-                tags.add(TAG_RUNNING)
-            out[addr] = tags
+            if self.needs_attention(w):
+                out[addr] = {TAG_DONE}
+            elif w.running:
+                out[addr] = {TAG_RUNNING}
+            else:
+                out[addr] = set()
         return out
 
-    def restore(self, data: dict, now: float) -> None:
-        """Carry focus/finish stamps across a daemon restart (windows that still exist)."""
-        for addr, w in (data.get("windows") or {}).items():
-            if addr in self.windows:
-                self.windows[addr].last_focus_ts = float(w.get("last_focus_ts") or 0)
-                self.windows[addr].finish_ts = float(w.get("finish_ts") or 0)
-                self.windows[addr].finished_by = w.get("finished_by")
-        for name, ts in (data.get("seen_ts") or {}).items():
-            self.seen_ts[name] = float(ts)
+    def visible_state(self) -> str:
+        """Everything a viewer can see; compare before/after to decide whether to publish."""
+        tags = {a: sorted(t) for a, t in self.tags_wanted().items() if t}
+        return json.dumps([self.meta_summary(), tags, self.current_meta, self.focused], sort_keys=True)
+
+    def snapshot(self, now: float) -> dict:
+        windows = {}
+        for addr, w in self.windows.items():
+            if not (w.agents or w.finish_ts):
+                continue
+            windows[addr] = {
+                "address": addr, "pid": w.pid, "workspace": w.workspace, "title": w.title,
+                "meta": w.meta, "last_focus_ts": w.last_focus_ts, "finish_ts": w.finish_ts,
+                "finished_by": w.finished_by, "finish_state": w.finish_state,
+                "attention": self.needs_attention(w), "running": w.running,
+                "agents": [
+                    {"kind": a.kind, "pids": a.pids, "state": a.state, "since": a.since, "armed": a.armed}
+                    for a in w.agents.values()
+                ],
+            }
+        return {"ts": now, "focused": self.focused, "current_meta": self.current_meta,
+                "metas": self.meta_summary(), "windows": windows}
+
+    def restore(self, data: dict) -> None:
+        """Carry stamps (and 'was working') across a daemon restart, for windows that still exist."""
+        for addr, old in (data.get("windows") or {}).items():
+            w = self.windows.get(addr)
+            if w is None or not isinstance(old, dict):
+                continue
+            w.last_focus_ts = float(old.get("last_focus_ts") or 0.0)
+            w.finish_ts = float(old.get("finish_ts") or 0.0)
+            w.finished_by = old.get("finished_by")
+            w.finish_state = old.get("finish_state")
+            for oa in old.get("agents") or []:
+                a = w.agents.get(oa.get("kind")) if isinstance(oa, dict) else None
+                if a is not None and (oa.get("armed") or oa.get("state") == "running"):
+                    a.armed = True
 
 
-def default_state_of(kind: str, pid: int, title: str) -> str | None:
-    if kind == "claude":
-        return claude_state_from_title(title)
-    if kind == "codex":
-        return codex_state(pid)
-    return None
-
-
-def write_snapshot(path: Path, tracker: AgentTracker) -> None:
-    data = tracker.snapshot()
-    data["seen_ts"] = tracker.seen_ts
-    data["ts"] = time.time()
+def write_snapshot(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data))
     os.replace(tmp, path)
+
+
+def actual_tags(clients: Iterable[dict]) -> dict[str, set[str]]:
+    """Our tags as the compositor has them (a trailing `*` marks rule-set tags)."""
+    return {
+        str(c.get("address")): {t.rstrip("*") for t in (c.get("tags") or []) if t.rstrip("*") in OUR_TAGS}
+        for c in clients
+    }
 
 
 def apply_tags(hypr: Hypr, wanted: dict[str, set[str]], current: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -356,9 +458,9 @@ def apply_tags(hypr: Hypr, wanted: dict[str, set[str]], current: dict[str, set[s
     dispatches = []
     for addr, tags in wanted.items():
         have = current.get(addr, set())
-        for t in tags - have:
+        for t in sorted(tags - have):
             dispatches.append(f"tagwindow +{t} address:{addr}")
-        for t in have - tags:
+        for t in sorted(have - tags):
             dispatches.append(f"tagwindow -{t} address:{addr}")
     if dispatches:
         hypr.batch(dispatches)
@@ -366,44 +468,49 @@ def apply_tags(hypr: Hypr, wanted: dict[str, set[str]], current: dict[str, set[s
 
 
 # --------------------------------------------------------------------------- #
-# waybar rendering
+# rendering (waybar sidebar + picker rows)
 # --------------------------------------------------------------------------- #
-
-COLOR_RUNNING = "#a6e3a1"
-COLOR_DONE = "#f9e2af"
-COLOR_DIM = "#7f849c"
-COLOR_CURRENT = "#cdd6f4"
 
 
 def _esc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def marks_markup(m: dict) -> str:
+    """Pango: ⟳N running · ✓N finished unseen · !N waiting for you · ○N idle."""
+    parts = []
+    for key, glyph, color in (
+        ("running", "⟳", COLOR_RUNNING),
+        ("done", "✓", COLOR_DONE),
+        ("waiting", "!", COLOR_WAITING),
+        ("idle", "○", COLOR_IDLE),
+    ):
+        if m.get(key):
+            parts.append(f'<span foreground="{color}">{glyph}{m[key]}</span>')
+    return " ".join(parts)
+
+
 def render_waybar(snapshot: dict, order: list[str]) -> dict:
-    """One line per meta: name, running count, unseen-finished count."""
+    """One line per meta: name (current one bold) + its agent marks."""
     metas = snapshot.get("metas", {})
     current = snapshot.get("current_meta")
     width = max((len(n) for n in order), default=4)
-    lines = []
-    tips = []
-    any_unseen = any_running = False
+    lines, tips = [], []
+    attention = running = False
     for name in order:
-        m = metas.get(name, {"running": 0, "unseen": 0, "agents": 0, "windows": 0})
+        m = metas.get(name, {})
         label = _esc(f"{name:<{width}}")
         if name == current:
             label = f'<span foreground="{COLOR_CURRENT}" weight="bold">{label}</span>'
         else:
             label = f'<span foreground="{COLOR_DIM}">{label}</span>'
-        marks = []
-        if m["running"]:
-            marks.append(f'<span foreground="{COLOR_RUNNING}">⟳{m["running"]}</span>')
-            any_running = True
-        if m["unseen"]:
-            marks.append(f'<span foreground="{COLOR_DONE}">✓{m["unseen"]}</span>')
-            any_unseen = True
-        if not marks and m["agents"]:
-            marks.append(f'<span foreground="{COLOR_DIM}">·{m["agents"]}</span>')
-        lines.append(f"{label}  {' '.join(marks)}".rstrip())
-        tips.append(f"{name}: {m['windows']} windows, {m['agents']} agents, {m['running']} running, {m['unseen']} finished unseen")
-    cls = "attention" if any_unseen else ("running" if any_running else "idle")
+        lines.append(f"{label}  {marks_markup(m)}".rstrip())
+        attention = attention or bool(m.get("done") or m.get("waiting"))
+        running = running or bool(m.get("running"))
+        tips.append(
+            f"{name}: {m.get('running', 0)} running, {m.get('done', 0)} finished unseen, "
+            f"{m.get('waiting', 0)} waiting, {m.get('idle', 0)} idle ({m.get('windows', 0)} windows)"
+        )
+    tips.append("⟳ running   ✓ finished since you focused it   ! waiting for you   ○ idle")
+    cls = "attention" if attention else ("running" if running else "idle")
     return {"text": "\n".join(lines), "tooltip": "\n".join(tips), "class": cls}

@@ -48,21 +48,20 @@ from .cli import (  # noqa: E402
     validate_name,
 )
 from .agents import (  # noqa: E402
-    COLOR_DIM,
-    COLOR_DONE,
-    COLOR_RUNNING,
     AgentTracker,
+    actual_tags,
     agents_file,
     apply_tags,
     find_agent_processes,
+    marks_markup,
     write_snapshot,
 )
 from .shortcuts import GlobalShortcuts  # noqa: E402
 
 log = logging.getLogger("hyprmeta")
 
-SCAN_INTERVAL_MS = 2000  # periodic agent scan (Codex has no title signal)
-RESCAN_DEBOUNCE_MS = 150  # after window/title/focus events
+SCAN_INTERVAL_MS = 2000  # full scan: new/exited agents, Codex rollouts, stop confirmation
+RESCAN_DEBOUNCE_MS = 150  # after a window opens, closes or moves
 
 NAMESPACE = "hyprmeta"
 WIDTH = 560
@@ -111,6 +110,7 @@ class MonitorCache:
         self.hypr = hypr
         self.monitors: list[Monitor] = []
         self._pending = False
+        self._buf = b""  # a recv() can end mid-line (or mid UTF-8 sequence)
         self.on_refresh = None  # callable(monitors) after each refresh
         self.on_events = None  # callable(list[(event, data)]) for every batch of events
         self.refresh()
@@ -143,9 +143,10 @@ class MonitorCache:
             log.error("Hyprland event socket EOF; exiting so systemd restarts us")
             Gtk.main_quit()
             return False
+        *lines, self._buf = (self._buf + data).split(b"\n")
         parsed = []
-        for line in data.decode(errors="replace").splitlines():
-            name, _, payload = line.partition(">>")
+        for raw in lines:
+            name, _, payload = raw.decode(errors="replace").partition(">>")
             parsed.append((name, payload))
         events = {name for name, _ in parsed}
         if events & REFRESH_EVENTS and not self._pending:
@@ -245,18 +246,6 @@ class Picker:
             row.set_activatable(False)
         return row
 
-    @staticmethod
-    def _agent_marks(summary: dict) -> str:
-        """Pango markup for the agent column: ⟳N running, ✓N finished-unseen, ·N idle."""
-        marks = []
-        if summary.get("running"):
-            marks.append(f'<span foreground="{COLOR_RUNNING}">⟳{summary["running"]}</span>')
-        if summary.get("unseen"):
-            marks.append(f'<span foreground="{COLOR_DONE}">✓{summary["unseen"]}</span>')
-        if not marks and summary.get("agents"):
-            marks.append(f'<span foreground="{COLOR_DIM}">·{summary["agents"]}</span>')
-        return "  ".join(marks)
-
     def _populate(self, query: str) -> None:
         for child in self.list.get_children():
             self.list.remove(child)
@@ -272,7 +261,7 @@ class Picker:
                     scored.append((-score, i, name, age, summary))
             scored.sort()
             for _, _, name, age, summary in scored:
-                text = GLib.markup_escape_text(f"{name:<{width}}{age:<{age_width}}") + self._agent_marks(summary)
+                text = GLib.markup_escape_text(f"{name:<{width}}{age:<{age_width}}") + marks_markup(summary)
                 self.list.add(self._row("entry", text.rstrip(), markup=True, name=name))
             q = query.strip()
             if q and not scored:  # nothing matches: Enter creates a meta with this name
@@ -339,16 +328,20 @@ class Picker:
         self.tracker = AgentTracker(cfg.base, store.metas)
         try:
             previous = json.loads(agents_file().read_text())
-        except (OSError, ValueError):
+        except FileNotFoundError:
             previous = None
-        self._scan(initial=previous)
+        except (OSError, ValueError) as exc:
+            log.warning("ignoring unreadable agent snapshot %s: %s", agents_file(), exc)
+            previous = None
+        self._full_scan(restore=previous)
         self.cache.on_events = self._on_hypr_events
         self.cache.on_refresh = self._on_monitors
         self._on_monitors(self.cache.monitors)
-        GLib.timeout_add(SCAN_INTERVAL_MS, self._scan)
+        GLib.timeout_add(SCAN_INTERVAL_MS, self._periodic_scan)
         log.info("agent tracking on: %d windows, %s", len(self.tracker.windows), agents_file())
 
     def _on_monitors(self, monitors) -> None:  # noqa: ANN001
+        """Keep meta names and the current meta (display only) in sync."""
         if self.tracker is None:
             return
         store = Store.load(state_path())
@@ -360,20 +353,28 @@ class Picker:
         except HyprmetaError:
             offset = None
         name = store.name_for_offset(offset) if offset is not None else None
-        if name != self.tracker.current_meta or name is not None:
-            self.tracker.set_current_meta(name, time.time())
-            self._publish()
+        if name != self.tracker.current_meta:
+            self.tracker.set_current_meta(name)
+            self._publish(write=True)
 
     def _on_hypr_events(self, events) -> None:  # noqa: ANN001
+        """Fast paths: focus and title changes need neither hyprctl nor /proc."""
         if self.tracker is None:
             return
+        now = time.time()
+        before = self.tracker.visible_state()
         rescan = False
         for name, payload in events:
-            if name == "activewindowv2" and payload:
-                self.tracker.focus("0x" + payload.strip(), time.time())
+            if name == "activewindowv2":
+                addr = payload.strip()
+                self.tracker.focus(f"0x{addr}" if addr else None, now)
+            elif name == "windowtitlev2":
+                addr, _, title = payload.partition(",")
+                self.tracker.set_title(f"0x{addr.strip()}", title, now)
+            elif name in ("openwindow", "closewindow", "movewindowv2"):
                 rescan = True
-            elif name in ("openwindow", "closewindow", "windowtitlev2", "movewindowv2", "workspacev2"):
-                rescan = True
+        if self.tracker.visible_state() != before:
+            self._publish(write=True)
         if rescan:
             self._request_scan()
 
@@ -383,39 +384,44 @@ class Picker:
             GLib.timeout_add(RESCAN_DEBOUNCE_MS, self._scan_once)
 
     def _scan_once(self) -> bool:
-        """Debounced one-shot scan (GLib removes the timer because we return False)."""
-        self._scan()
+        """Debounced one-shot scan. Returns False so GLib drops the timer —
+        a callback returning True REPEATS, which once saturated the main loop."""
+        self._scan_pending = False
+        self._full_scan()
         return False
 
-    def _scan(self, initial: dict | None = None) -> bool:
-        """Rebuild agent state from hyprctl clients + /proc; publish on change.
+    def _periodic_scan(self) -> bool:
+        self._full_scan()
+        return True  # keep repeating every SCAN_INTERVAL_MS
 
-        Returns True so the periodic SCAN_INTERVAL_MS timer keeps repeating.
-        Never hand this directly to a one-shot timer — use `_scan_once`.
-        """
-        self._scan_pending = False
+    def _full_scan(self, restore: dict | None = None) -> None:
+        """Rebuild windows/agents from hyprctl clients + /proc; reconcile tags with the compositor."""
         if self.tracker is None:
-            return False
+            return
         try:
             clients = self.hypr.clients()
         except (HyprmetaError, ValueError) as exc:
             log.warning("clients scan failed: %s", exc)
-            return True
-        now = time.time()
-        changed = self.tracker.update(clients, find_agent_processes(), now)
-        if initial is not None:
-            self.tracker.restore(initial, now)
-            changed = True
-        if changed:
-            self._publish()
-        return True
+            return
+        before = self.tracker.visible_state()
+        self.tracker.update(clients, find_agent_processes(), time.time())
+        if restore is not None:
+            self.tracker.restore(restore)
+        # Diff against the tags Hyprland really has, so a restart or a stray
+        # manual tag can never leave a stale border behind.
+        self._tags = actual_tags(clients)
+        self._publish(write=restore is not None or self.tracker.visible_state() != before)
 
-    def _publish(self) -> None:
+    def _publish(self, write: bool) -> None:
         assert self.tracker is not None
-        try:
-            write_snapshot(agents_file(), self.tracker)
-        except OSError as exc:
-            log.warning("cannot write %s: %s", agents_file(), exc)
+        for line in self.tracker.events:
+            log.info("finished: %s", line)
+        self.tracker.events.clear()
+        if write:
+            try:
+                write_snapshot(agents_file(), self.tracker.snapshot(time.time()))
+            except OSError as exc:
+                log.warning("cannot write %s: %s", agents_file(), exc)
         try:
             self._tags = apply_tags(self.hypr, self.tracker.tags_wanted(), self._tags)
         except HyprmetaError as exc:
