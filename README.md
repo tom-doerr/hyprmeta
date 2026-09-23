@@ -43,20 +43,51 @@ hyprmeta switch -        # back to the previous one
 {
   "base": [4, 5, 6],
   "step": 10,
-  "menu": "wofi --dmenu --prompt meta"
+  "menu": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi.css --prompt \"meta workspace\"",
+  "menu_new": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi-new.css --exec-search -D dynamic_lines=true -D lines=3 --prompt \"＋ name for the new meta workspace\""
 }
 ```
 
 `base` lists one workspace per monitor, **left to right by x position**. `step`
 is the default spacing between offsets. `menu` is any command that reads
-candidate lines on stdin and prints the chosen line.
+candidate lines on stdin and prints the chosen line. `menu_new` is the same
+kind of command used to ask for a new meta's name: it receives one hint line
+(`ᴛʏᴘᴇ ᴀ ɴᴀᴍᴇ · ᴇɴᴛᴇʀ ᴄʀᴇᴀᴛᴇs ɪᴛ · ᴇsᴄ ᴄᴀɴᴄᴇʟs`) and must print what was
+**typed**, which is what wofi's `--exec-search` does; the shipped stylesheet
+tints that dialog mint so it never looks like the picker. `{assets}` expands
+to the package's `assets/` directory.
 
 ## Hyprland binds
 
 ```ini
-bind = $mainMod, SPACE, exec, hyprmeta pick                 # jump to a meta workspace
-bind = $mainMod SHIFT, SPACE, exec, hyprmeta pick --move    # move the focused window there
+# Use the full path: `exec` binds run with the system PATH, which usually
+# lacks ~/.local/bin where pipx installs commands.
+bind = $mainMod, SPACE, exec, ~/.local/bin/hyprmeta pick                 # jump (or close an open picker)
+bind = $mainMod SHIFT, SPACE, exec, ~/.local/bin/hyprmeta pick --move    # move the focused window there
 ```
+
+Pressing the bind while a picker is open closes it instead of stacking a second
+one (a pid file in `$XDG_RUNTIME_DIR` tracks the running picker's process
+group).
+
+## Frosted-glass look
+
+The shipped `wofi.css` paints a translucent white pane; the blur behind it
+comes from the compositor. Add a layer rule so Hyprland blurs wofi's surface
+(Hyprland ≥ 0.51 block syntax):
+
+```ini
+layerrule {
+    name = wofi-glass
+    match:namespace = ^wofi$
+    blur = true
+    ignore_alpha = 0.1
+}
+```
+
+Keep `ignore_alpha` below the pane's alpha (0.24 in `wofi.css`) or the pane is
+treated as see-through and gets no blur. Apply with `hyprctl reload
+config-only`, which reloads the config without re-applying monitor modes.
 
 Optional: make `Super+N` relative to the current meta workspace, so `Super+4`
 shows `14` while you are in `taxes`:

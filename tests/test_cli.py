@@ -191,30 +191,38 @@ def test_menu_lines_mru_first_with_current_marker(tmp_path):
         recent=["taxes", "home"],
     )
     assert app.menu_lines() == [
-        "taxes\t14 15 16  (current)",
-        "home\t4 5 6",
-        "alpha\t34 35 36",
-        "zeta\t24 25 26",
+        "●  taxes   14 · 15 · 16",
+        "○  home    4 · 5 · 6",
+        "○  alpha   34 · 35 · 36",
+        "○  zeta    24 · 25 · 26",
         cli.NEW_ENTRY,
     ]
+    assert cli.NEW_ENTRY == "＋  new meta workspace"
+
+
+def test_name_from_line_roundtrips_and_passes_typed_queries_through():
+    assert App.name_from_line("●  taxes   14 · 15 · 16") == "taxes"
+    assert App.name_from_line("○  two words   4 · 5 · 6") == "two words"
+    assert App.name_from_line("bills") == "bills"
+    assert App.name_from_line("  bills \n") == "bills"
 
 
 def test_resolve_pick_existing_typed_and_new_entry(tmp_path):
     app = make_app(FakeHyprctl(), tmp_path / "s.json", {"home": 0, "taxes": 10})
     prompts = []
 
-    def prompt(text):
-        prompts.append(text)
+    def prompt():
+        prompts.append(True)
         return "  music "
 
-    assert app.resolve_pick("taxes\t14 15 16\n", prompt) == "taxes"
+    assert app.resolve_pick("○  taxes   14 · 15 · 16\n", prompt) == "taxes"
     # A typed query that matched nothing becomes a new meta.
     assert app.resolve_pick("bills", prompt) == "bills"
     assert app.store.metas["bills"] == 20
     # The explicit "+ new" entry asks for a name.
     assert app.resolve_pick(cli.NEW_ENTRY, prompt) == "music"
     assert app.store.metas["music"] == 30
-    assert prompts == ["name for the new meta workspace"]
+    assert prompts == [True]
     with pytest.raises(HyprmetaError, match="nothing selected"):
         app.resolve_pick("", prompt)
 
@@ -230,6 +238,10 @@ def test_store_roundtrip_drops_recent_names_that_no_longer_exist(tmp_path):
     assert Store.load(p).recent == ["base"]
     with pytest.raises(HyprmetaError, match="reserved"):
         store.create(cli.NEW_ENTRY, 10)
+    with pytest.raises(HyprmetaError, match="reserved"):
+        store.create("● fake", 10)
+    with pytest.raises(HyprmetaError, match="double spaces"):
+        store.create("two  spaces", 10)
 
 
 # --------------------------------------------------------------------------- #
@@ -279,15 +291,15 @@ def test_main_pick_with_fake_menu(paths, monkeypatch, capsys):
     fake = FakeHyprctl()
     seen = {}
 
-    def fake_menu(command, lines, prompt_text=None):
+    def fake_menu(command, lines):
         seen["command"] = command
         seen["lines"] = lines
-        return "taxes\t14 15 16"
+        return "○  taxes   14 · 15 · 16"
 
     monkeypatch.setattr(cli, "run_menu", fake_menu)
     assert cli.main(["pick", "--menu", "fzf"], hypr=Hypr(fake)) == 0
     assert seen["command"] == "fzf"
-    assert seen["lines"][0] == "home\t4 5 6  (current)"
+    assert seen["lines"][0] == "●  home    4 · 5 · 6"
     assert capsys.readouterr().out.strip() == "taxes: 14 15 16"
     assert fake.batches[0][1] == "focusworkspaceoncurrentmonitor 14"
 
@@ -301,3 +313,111 @@ def test_run_menu_reports_cancel(monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: Proc())
     with pytest.raises(HyprmetaError, match="cancelled"):
         cli.run_menu("wofi --dmenu", ["a"])
+
+
+def test_expand_menu_points_at_shipped_assets():
+    cmd = cli.expand_menu(cli.DEFAULT_MENU)
+    assert "{assets}" not in cmd
+    assert (cli.ASSETS / "wofi.conf").is_file()
+    assert (cli.ASSETS / "wofi.css").is_file()
+    assert (cli.ASSETS / "wofi-new.css").is_file()
+    assert "wofi-new.css" in cli.expand_menu(cli.DEFAULT_MENU_NEW)
+
+
+def test_picker_lock_toggles_a_running_picker(tmp_path):
+    pidfile = tmp_path / "pick.pid"
+    killed = []
+    lock = cli.PickerLock(pidfile, alive=lambda pid: pid == 4242, kill=killed.append)
+
+    assert lock.close_running() is False  # no pid file yet
+    pidfile.write_text("999\n")  # stale: not alive
+    assert lock.close_running() is False
+    pidfile.write_text("4242\n")  # live picker
+    assert lock.close_running() is True
+    assert killed == [4242]
+    assert not pidfile.exists()
+
+
+def test_picker_lock_writes_and_removes_own_pid(tmp_path):
+    pidfile = tmp_path / "pick.pid"
+    with cli.PickerLock(pidfile, alive=lambda pid: True, kill=lambda pid: None):
+        assert pidfile.read_text().strip() == str(cli.os.getpid())
+    assert not pidfile.exists()
+
+
+def test_main_pick_second_call_closes_first(paths, monkeypatch, capsys):
+    cfg, state = paths
+    Config(base=[4, 5, 6]).save(cfg)
+    Store(metas={"home": 0}, recent=["home"]).save(state)
+    pidfile = cfg.parent / "pick.pid"
+    pidfile.write_text("777\n")
+    killed = []
+    RealLock = cli.PickerLock
+    monkeypatch.setattr(
+        cli,
+        "PickerLock",
+        lambda: RealLock(pidfile, alive=lambda pid: pid == 777, kill=killed.append),
+    )
+    menu_calls = []
+    monkeypatch.setattr(cli, "run_menu", lambda *a: menu_calls.append(a) or "")
+    assert cli.main(["pick"], hypr=Hypr(FakeHyprctl())) == 0
+    assert killed == [777]
+    assert menu_calls == []  # the menu was never opened
+    assert "closed the open picker" in capsys.readouterr().out
+
+
+def test_new_dialog_stylesheet_is_self_contained():
+    base = (cli.ASSETS / "wofi.css").read_text()
+    new = (cli.ASSETS / "wofi-new.css").read_text()
+    assert "@import url" not in new
+    # Every rule block of the base sheet must be present verbatim.
+    base_rules = base[base.index("* {"):]
+    assert base_rules.strip() in new
+
+
+def test_run_menu_sends_no_trailing_newline_for_empty_lines(monkeypatch):
+    seen = {}
+
+    class Proc:
+        returncode = 0
+        stdout = "typed\n"
+        stderr = ""
+
+    def fake_run(argv, input, **kw):
+        seen["input"] = input
+        return Proc()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.run_menu("wofi --dmenu", []) == "typed"
+    assert seen["input"] == ""
+    cli.run_menu("wofi --dmenu", ["a", "b"])
+    assert seen["input"] == "a\nb\n"
+
+
+def test_new_dialog_hint_or_empty_answer_is_an_error(tmp_path):
+    app = make_app(FakeHyprctl(), tmp_path / "s.json", {"home": 0})
+    with pytest.raises(HyprmetaError, match="no name typed"):
+        app.resolve_pick(cli.NEW_ENTRY, lambda: cli.NEW_HINT + "\n")
+    with pytest.raises(HyprmetaError, match="no name typed"):
+        app.resolve_pick(cli.NEW_ENTRY, lambda: "   ")
+    assert app.store.metas == {"home": 0}
+
+
+def test_main_pick_new_entry_uses_menu_new_with_the_hint(paths, monkeypatch, capsys):
+    cfg, state = paths
+    Config(base=[4, 5, 6], menu="MAIN", menu_new="NEW").save(cfg)
+    Store(metas={"home": 0}, recent=["home"]).save(state)
+    calls = []
+
+    def fake_menu(command, lines):
+        calls.append((command, list(lines)))
+        return cli.NEW_ENTRY if command == "MAIN" else "bills"
+
+    monkeypatch.setattr(cli, "run_menu", fake_menu)
+    RealLock = cli.PickerLock
+    monkeypatch.setattr(cli, "PickerLock", lambda: RealLock(cfg.parent / "pick.pid"))
+    fake = FakeHyprctl()
+    assert cli.main(["pick"], hypr=Hypr(fake)) == 0
+    assert calls == [("MAIN", ["●  home   4 · 5 · 6", cli.NEW_ENTRY]), ("NEW", [cli.NEW_HINT])]
+    assert capsys.readouterr().out.strip() == "bills: 14 15 16"
+    assert json.loads(state.read_text())["metas"] == {"home": 0, "bills": 10}

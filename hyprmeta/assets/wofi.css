@@ -1,0 +1,82 @@
+/* hyprmeta picker: milky frosted glass.
+ *
+ * The blur itself comes from the compositor (Hyprland: `layerrule = blur, wofi`
+ * plus `layerrule = ignorealpha 0.2, wofi`); this sheet only paints translucent
+ * white layers on top of it so the picker reads like a frosted pane.
+ */
+
+* {
+    font-family: "JetBrains Mono", "Iosevka", monospace;
+    font-size: 15px;
+    color: rgba(245, 245, 250, 0.96);
+}
+
+window {
+    background-color: transparent;
+    border-radius: 18px;
+}
+
+/* Keep this alpha ABOVE the compositor's ignore_alpha (0.1 in the layerrule),
+ * otherwise the pane is treated as see-through and gets no blur. */
+#outer-box {
+    margin: 0;
+    padding: 14px;
+    background-color: rgba(255, 255, 255, 0.24);
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    border-radius: 18px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+#input {
+    margin-bottom: 10px;
+    padding: 10px 14px;
+    background-color: rgba(255, 255, 255, 0.10);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 12px;
+    color: rgba(255, 255, 255, 0.98);
+    caret-color: rgba(255, 255, 255, 0.9);
+}
+
+#input:focus {
+    border-color: rgba(255, 255, 255, 0.45);
+    box-shadow: none;
+    outline: none;
+}
+
+#input image {
+    color: rgba(255, 255, 255, 0.6);
+}
+
+#scroll {
+    margin: 0;
+    padding: 0;
+    background-color: transparent;
+}
+
+#inner-box {
+    background-color: transparent;
+}
+
+#entry {
+    padding: 9px 14px;
+    margin: 2px 0;
+    border-radius: 12px;
+    background-color: transparent;
+    border: 1px solid transparent;
+    outline: none;
+}
+
+#entry:selected {
+    background-color: rgba(255, 255, 255, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+#entry:selected #text {
+    color: rgba(255, 255, 255, 1.0);
+}
+
+#text {
+    margin: 0;
+    color: rgba(240, 240, 245, 0.92);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}

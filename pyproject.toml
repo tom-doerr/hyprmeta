@@ -21,5 +21,8 @@ hyprmeta = "hyprmeta.cli:main"
 [tool.setuptools.packages.find]
 include = ["hyprmeta*"]
 
+[tool.setuptools.package-data]
+hyprmeta = ["assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

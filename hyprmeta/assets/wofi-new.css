@@ -1,0 +1,117 @@
+/* hyprmeta "name the new meta workspace" dialog: same glass as wofi.css, mint
+ * tint, no list. SELF-CONTAINED on purpose: wofi feeds the stylesheet to GTK
+ * from memory, so a relative @import of wofi.css does not resolve. Keep the
+ * first part in sync with wofi.css (tests check it). */
+
+* {
+    font-family: "JetBrains Mono", "Iosevka", monospace;
+    font-size: 15px;
+    color: rgba(245, 245, 250, 0.96);
+}
+
+window {
+    background-color: transparent;
+    border-radius: 18px;
+}
+
+/* Keep this alpha ABOVE the compositor's ignore_alpha (0.1 in the layerrule),
+ * otherwise the pane is treated as see-through and gets no blur. */
+#outer-box {
+    margin: 0;
+    padding: 14px;
+    background-color: rgba(255, 255, 255, 0.24);
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    border-radius: 18px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+#input {
+    margin-bottom: 10px;
+    padding: 10px 14px;
+    background-color: rgba(255, 255, 255, 0.10);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 12px;
+    color: rgba(255, 255, 255, 0.98);
+    caret-color: rgba(255, 255, 255, 0.9);
+}
+
+#input:focus {
+    border-color: rgba(255, 255, 255, 0.45);
+    box-shadow: none;
+    outline: none;
+}
+
+#input image {
+    color: rgba(255, 255, 255, 0.6);
+}
+
+#scroll {
+    margin: 0;
+    padding: 0;
+    background-color: transparent;
+}
+
+#inner-box {
+    background-color: transparent;
+}
+
+#entry {
+    padding: 9px 14px;
+    margin: 2px 0;
+    border-radius: 12px;
+    background-color: transparent;
+    border: 1px solid transparent;
+    outline: none;
+}
+
+#entry:selected {
+    background-color: rgba(255, 255, 255, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+#entry:selected #text {
+    color: rgba(255, 255, 255, 1.0);
+}
+
+#text {
+    margin: 0;
+    color: rgba(240, 240, 245, 0.92);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+/* ---- mint overrides ---------------------------------------------------- */
+
+#outer-box {
+    background-color: rgba(190, 240, 210, 0.22);
+    border: 1px solid rgba(190, 240, 210, 0.60);
+}
+
+#input {
+    background-color: rgba(190, 240, 210, 0.16);
+    border: 1px solid rgba(190, 240, 210, 0.55);
+    margin-bottom: 0;
+}
+
+#input:focus {
+    border-color: rgba(200, 255, 220, 0.9);
+}
+
+#scroll {
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+}
+
+/* The single line here is a hint label, not a choice: no highlight, dim text. */
+#entry,
+#entry:selected {
+    background-color: transparent;
+    border: 1px solid transparent;
+    padding: 4px 14px 0 14px;
+}
+
+#entry #text,
+#entry:selected #text {
+    color: rgba(255, 255, 255, 0.55);
+    text-shadow: none;
+}

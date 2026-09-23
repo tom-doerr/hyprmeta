@@ -20,7 +20,13 @@ from typing import Callable, Sequence
 
 __all__ = ["main", "Hypr", "Store"]
 
-NEW_ENTRY = "+ new meta workspace"
+ASSETS = Path(__file__).resolve().parent / "assets"
+
+# Menu lines are "<glyph>  <name><two or more spaces><workspaces>".
+GLYPH_CURRENT = "●"
+GLYPH_OTHER = "○"
+GLYPH_NEW = "＋"
+NEW_ENTRY = f"{GLYPH_NEW}  new meta workspace"
 
 Runner = Callable[[Sequence[str]], str]
 
@@ -126,7 +132,22 @@ def state_path() -> Path:
     return _xdg("XDG_STATE_HOME", ".local/state") / "hyprmeta" / "state.json"
 
 
-DEFAULT_MENU = "wofi --dmenu --prompt meta"
+# `{assets}` expands to the package's assets directory (wofi config + styles).
+DEFAULT_MENU = (
+    "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi.css "
+    '--prompt "meta workspace"'
+)
+# The new-name dialog shows NEW_HINT as its only line, which keeps wofi's focus
+# on the list so the GTK placeholder (prompt) stays visible; --exec-search makes
+# Enter return the typed text regardless of that line. Sizing: wofi 1.4 ignores
+# --height/--lines for the surface once entries arrive; dynamic_lines with
+# lines=3 measured 131 px = input + one hint row (lines=2 clips the row).
+DEFAULT_MENU_NEW = (
+    "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi-new.css "
+    "--exec-search -D dynamic_lines=true -D lines=3 "
+    '--prompt "＋ name for the new meta workspace"'
+)
+NEW_HINT = "ᴛʏᴘᴇ ᴀ ɴᴀᴍᴇ · ᴇɴᴛᴇʀ ᴄʀᴇᴀᴛᴇs ɪᴛ · ᴇsᴄ ᴄᴀɴᴄᴇʟs"
 
 
 @dataclass
@@ -134,6 +155,7 @@ class Config:
     base: list[int]
     step: int = 10
     menu: str = DEFAULT_MENU
+    menu_new: str = DEFAULT_MENU_NEW
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -149,12 +171,20 @@ class Config:
         step = int(data.get("step", 10))
         if step <= 0:
             raise HyprmetaError(f"{path}: `step` must be positive")
-        return cls(base=base, step=step, menu=str(data.get("menu", DEFAULT_MENU)))
+        return cls(
+            base=base,
+            step=step,
+            menu=str(data.get("menu", DEFAULT_MENU)),
+            menu_new=str(data.get("menu_new", DEFAULT_MENU_NEW)),
+        )
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"base": self.base, "step": self.step, "menu": self.menu}, indent=2)
+            json.dumps(
+                {"base": self.base, "step": self.step, "menu": self.menu, "menu_new": self.menu_new},
+                indent=2,
+            )
             + "\n"
         )
 
@@ -238,10 +268,10 @@ def validate_name(name: str) -> str:
     name = name.strip()
     if not name:
         raise HyprmetaError("meta workspace name must not be empty")
-    if "\t" in name or "\n" in name:
-        raise HyprmetaError("meta workspace name must not contain tabs or newlines")
-    if name == NEW_ENTRY:
+    if name == NEW_ENTRY or name[0] in (GLYPH_CURRENT, GLYPH_OTHER, GLYPH_NEW):
         raise HyprmetaError(f"{name!r} is reserved")
+    if "\t" in name or "\n" in name or "  " in name:
+        raise HyprmetaError("meta workspace name must not contain tabs, newlines or double spaces")
     return name
 
 
@@ -361,25 +391,42 @@ class App:
     # -- picker ------------------------------------------------------------ #
 
     def menu_lines(self) -> list[str]:
+        """One aligned line per meta: `●  taxes     14 · 15 · 16`, MRU first."""
         cur = self.current_name()
+        names = self.store.ordered()
+        width = max((len(n) for n in names), default=0) + 3
         lines = []
-        for name in self.store.ordered():
-            ws = " ".join(str(w) for w in self.workspaces_for(self.store.metas[name]))
-            mark = "  (current)" if name == cur else ""
-            lines.append(f"{name}\t{ws}{mark}")
+        for name in names:
+            ws = " · ".join(str(w) for w in self.workspaces_for(self.store.metas[name]))
+            glyph = GLYPH_CURRENT if name == cur else GLYPH_OTHER
+            lines.append(f"{glyph}  {name:<{width}}{ws}")
         lines.append(NEW_ENTRY)
         return lines
 
-    def resolve_pick(self, choice: str, prompt: Callable[[str], str]) -> str:
+    @staticmethod
+    def name_from_line(line: str) -> str:
+        """Inverse of `menu_lines`; a typed query comes back unchanged."""
+        line = line.strip()
+        for glyph in (GLYPH_CURRENT, GLYPH_OTHER):
+            prefix = f"{glyph}  "
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+                break
+        return line.split("  ", 1)[0].strip()
+
+    def resolve_pick(self, choice: str, prompt: Callable[[], str]) -> str:
         """Turn a menu selection into a meta name, creating one when asked."""
         choice = choice.rstrip("\n")
         if not choice:
             raise HyprmetaError("nothing selected")
         if choice == NEW_ENTRY:
-            name = validate_name(prompt("name for the new meta workspace"))
+            typed = prompt().strip()
+            if not typed or typed == NEW_HINT:
+                raise HyprmetaError("no name typed for the new meta workspace")
+            name = validate_name(typed)
             self.create(name, None)
             return name
-        name = choice.split("\t", 1)[0].strip()
+        name = self.name_from_line(choice)
         if name in self.store.metas:
             return name
         # A typed query that matched nothing: treat it as a new name.
@@ -388,14 +435,85 @@ class App:
         return name
 
 
-def run_menu(command: str, lines: Sequence[str], prompt_text: str | None = None) -> str:
-    argv = shlex.split(command)
+def expand_menu(command: str) -> str:
+    return command.replace("{assets}", str(ASSETS))
+
+
+class PickerLock:
+    """One picker at a time: a second `pick` closes the first instead of stacking.
+
+    The pid file holds the process-group id of the running picker, so killing
+    it takes the menu child (wofi/fzf) down with the Python parent.
+    """
+
+    def __init__(
+        self,
+        path: Path | None = None,
+        alive: Callable[[int], bool] | None = None,
+        kill: Callable[[int], None] | None = None,
+    ) -> None:
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or "/tmp"
+        self.path = path or Path(runtime) / "hyprmeta-pick.pid"
+        self._alive = alive or self._pid_alive
+        self._kill = kill or self._killpg
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return False
+        return b"hyprmeta" in cmdline
+
+    @staticmethod
+    def _killpg(pgid: int) -> None:
+        import signal
+
+        os.killpg(pgid, signal.SIGTERM)
+
+    def running(self) -> int | None:
+        try:
+            pid = int(self.path.read_text().strip())
+        except (OSError, ValueError):
+            return None
+        return pid if self._alive(pid) else None
+
+    def close_running(self) -> bool:
+        pid = self.running()
+        if pid is None:
+            return False
+        self._kill(pid)
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        return True
+
+    def __enter__(self) -> "PickerLock":
+        try:
+            os.setpgrp()
+        except OSError:
+            pass  # already a group leader; killpg(pid) still reaches us
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(f"{os.getpid()}\n")
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        try:
+            if self.path.read_text().strip() == str(os.getpid()):
+                self.path.unlink()
+        except OSError:
+            pass
+
+
+def run_menu(command: str, lines: Sequence[str]) -> str:
+    argv = shlex.split(expand_menu(command))
     if not argv:
         raise HyprmetaError("menu command is empty")
-    if prompt_text and argv[0] == "wofi":
-        argv = [a for a in argv if not a.startswith("--prompt")]
-        argv = [argv[0], "--prompt", prompt_text, *argv[1:]]
-    proc = subprocess.run(argv, input="\n".join(lines) + "\n", capture_output=True, text=True)
+    # No trailing newline when there are no lines: wofi would show one empty,
+    # selectable entry for it.
+    stdin = "\n".join(lines) + "\n" if lines else ""
+    proc = subprocess.run(argv, input=stdin, capture_output=True, text=True)
     if proc.returncode != 0:
         # Escape in the menu is a cancel, not an error worth a traceback.
         raise HyprmetaError("menu cancelled" if not proc.stderr.strip() else proc.stderr.strip())
@@ -518,9 +636,15 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             ws = app.move_window(args.name, follow=args.follow)
             print(f"moved to workspace {ws} ({args.name})")
         elif args.cmd == "pick":
+            lock = PickerLock()
+            if lock.close_running():
+                print("closed the open picker")
+                return 0
             menu = args.menu or cfg.menu
-            choice = run_menu(menu, app.menu_lines())
-            name = app.resolve_pick(choice, lambda text: run_menu(menu, [], prompt_text=text))
+            menu_new = args.menu or cfg.menu_new
+            with lock:
+                choice = run_menu(menu, app.menu_lines())
+                name = app.resolve_pick(choice, lambda: run_menu(menu_new, [NEW_HINT]))
             if args.move:
                 ws = app.move_window(name, follow=args.follow)
                 print(f"moved to workspace {ws} ({name})")
