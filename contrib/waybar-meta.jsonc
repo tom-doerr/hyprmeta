@@ -1,0 +1,35 @@
+// A second waybar bar (waybar's config may be a JSON array of bars): a narrow
+// sidebar on one output listing every meta workspace with its agent status.
+// Drop this object into your config array and the CSS into style.css.
+{
+    "name": "meta",
+    "output": "HDMI-A-1",
+    "layer": "top",
+    "position": "right",
+    "width": 230,
+    "spacing": 0,
+    "modules-left": ["custom/hyprmeta"],
+    "custom/hyprmeta": {
+        "exec": "/home/USER/.local/bin/hyprmeta agents --waybar --follow",
+        "return-type": "json",
+        "restart-interval": 5,
+        "tooltip": true,
+        "on-click": "/home/USER/.local/bin/hyprmeta pick"
+    }
+}
+
+/* style.css
+window#waybar.meta {
+    background-color: rgba(30, 30, 46, 0.55);
+    border-left: 1px solid rgba(190, 240, 210, 0.35);
+}
+#custom-hyprmeta {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+    padding: 10px 12px;
+    color: #cdd6f4;
+}
+#custom-hyprmeta.attention { border-left: 3px solid #f9e2af; }
+#custom-hyprmeta.running   { border-left: 3px solid #a6e3a1; }
+#custom-hyprmeta.error     { color: #f38ba8; }
+*/

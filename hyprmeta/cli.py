@@ -83,6 +83,9 @@ class Hypr:
             raise HyprmetaError("hyprctl reports no monitors")
         return sorted(mons, key=lambda m: m.x)
 
+    def clients(self) -> list[dict]:
+        return json.loads(self._run(["-j", "clients"]))
+
     def workspace_monitors(self) -> dict[int, str]:
         raw = json.loads(self._run(["-j", "workspaces"]))
         return {int(w["id"]): w["monitor"] for w in raw}
@@ -304,18 +307,35 @@ def socket_path() -> str:
     return os.path.join(runtime, "hyprmeta.sock")
 
 
-def daemon_send(command: str, timeout: float = 0.5) -> str | None:
-    """Send one command to the daemon; None when no daemon is listening."""
+def daemon_send(command: str, timeout: float = 1.0) -> str | None:
+    """Send one command to the daemon.
+
+    Returns None only when NO daemon is listening (no socket, or nothing
+    accepting). A daemon that accepts but does not answer is an error — never
+    fall through to the menu command in that case, that hides a stuck daemon.
+    """
+    path = socket_path()
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(timeout)
-        s.connect(socket_path())
+        s.connect(path)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return None
+    except OSError as exc:
+        raise HyprmetaError(f"cannot connect to the daemon socket {path}: {exc}")
+    try:
         s.sendall(command.encode())
         reply = s.recv(256).decode(errors="replace").strip()
+    except socket.timeout:
+        raise HyprmetaError(
+            f"the daemon at {path} accepted {command!r} but did not answer within {timeout}s "
+            "(main loop stuck? see `journalctl --user -u hyprmeta-daemon`)"
+        )
+    except OSError as exc:
+        raise HyprmetaError(f"daemon socket error: {exc}")
+    finally:
         s.close()
-        return reply
-    except (OSError, socket.timeout):
-        return None
+    return reply
 
 
 def fuzzy_score(query: str, text: str) -> float | None:
@@ -679,6 +699,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("daemon", help="run the resident GTK picker (global shortcuts hyprmeta:pick / pick-move)")
 
+    s = sub.add_parser("agents", help="agent status per meta workspace (from the daemon's snapshot)")
+    s.add_argument("--waybar", action="store_true", help="print a waybar custom-module JSON line")
+    s.add_argument("--follow", action="store_true", help="with --waybar: keep printing when the snapshot changes")
+
     s = sub.add_parser("goto", help="workspace N relative to the current meta (for Super+N binds)")
     s.add_argument("n", type=int)
 
@@ -709,6 +733,45 @@ def cmd_init(args: argparse.Namespace, hypr: Hypr) -> int:
     return 0
 
 
+def cmd_agents(args: argparse.Namespace) -> int:
+    from .agents import agents_file, render_waybar  # lazy: agents imports this module
+
+    path = agents_file()
+
+    def load() -> dict:
+        try:
+            return json.loads(path.read_text())
+        except FileNotFoundError:
+            raise HyprmetaError(f"no agent snapshot at {path}; is `hyprmeta daemon` running?")
+        except ValueError as exc:
+            raise HyprmetaError(f"unreadable agent snapshot {path}: {exc}")
+
+    order = Store.load(state_path()).ordered()
+    if not args.waybar:
+        print(json.dumps(load(), indent=2))
+        return 0
+    last_mtime = None
+    while True:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime != last_mtime:
+            last_mtime = mtime
+            try:
+                snap = load()
+            except HyprmetaError as exc:
+                line = {"text": "hyprmeta: no daemon", "tooltip": str(exc), "class": "error"}
+            else:
+                # picker order (most recently opened first), current meta included
+                names = Store.load(state_path()).ordered() or order
+                line = render_waybar(snap, names)
+            print(json.dumps(line), flush=True)
+        if not args.follow:
+            return 0
+        time.sleep(0.5)
+
+
 def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
     args = build_parser().parse_args(argv)
     hypr = hypr or Hypr()
@@ -719,6 +782,8 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             from .daemon import run as run_daemon
 
             return run_daemon()
+        if args.cmd == "agents":
+            return cmd_agents(args)
         if args.cmd == "pick" and not args.no_daemon:
             reply = daemon_send("show-move" if args.move else "toggle")
             if reply is not None:

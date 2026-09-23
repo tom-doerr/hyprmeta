@@ -94,6 +94,36 @@ It also listens on `$XDG_RUNTIME_DIR/hyprmeta.sock` (`toggle`, `show`,
 is running and falls back to the menu command below otherwise (`--no-daemon`
 forces the menu).
 
+## Agent status: which terminals run Claude Code / Codex, and who finished
+
+The daemon also tracks coding agents per terminal window, with no hooks:
+
+- **Claude Code** rewrites the terminal title: `✳ …` while idle, a spinner
+  glyph (`◑`, braille) while working.
+- **Codex** keeps its rollout `.jsonl` open; its tail carries `task_started`,
+  `task_complete` and `turn_aborted`.
+- `/proc` ancestry ties each agent pid to the ghostty window Hyprland reports.
+
+An agent going running → idle (or exiting while running) stamps its window as
+*finished*. A window stays **unseen** until it is focused again; a meta
+workspace stays **unseen** until it is the one on screen. That state shows up
+in three places:
+
+1. **The picker rows**: `⟳2` agents running, `✓1` finished since you looked,
+   `·3` idle agents.
+2. **A waybar sidebar** (`hyprmeta agents --waybar --follow` as a custom
+   module; one line per meta, current one bold, class `attention` / `running`
+   / `idle` for CSS). See `contrib/waybar-meta.jsonc`.
+3. **Window borders**: the daemon tags terminals `agent-running` / `agent-done`
+   (`tagwindow`), and two window rules paint them:
+
+```ini
+windowrule { name = agent-done;    match:tag = agent-done;    border_color = rgb(f9e2af) rgb(b8a35a) }
+windowrule { name = agent-running; match:tag = agent-running; border_color = rgb(a6e3a1) rgb(5f8a5c) }
+```
+
+`hyprmeta agents` prints the raw snapshot (`$XDG_RUNTIME_DIR/hyprmeta/agents.json`).
+
 ## Menu-command fallback (wofi)
 
 ```ini
