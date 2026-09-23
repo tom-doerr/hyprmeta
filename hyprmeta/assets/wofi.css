@@ -1,8 +1,8 @@
-/* hyprmeta picker: milky frosted glass.
+/* hyprmeta picker: mint frosted glass.
  *
- * The blur itself comes from the compositor (Hyprland: `layerrule = blur, wofi`
- * plus `layerrule = ignorealpha 0.2, wofi`); this sheet only paints translucent
- * white layers on top of it so the picker reads like a frosted pane.
+ * The blur itself comes from the compositor (Hyprland layerrule: blur = true,
+ * ignore_alpha = 0.1 on namespace ^wofi$); this sheet only paints translucent
+ * mint layers on top of it so the picker reads like a frosted pane.
  */
 
 * {
@@ -21,8 +21,8 @@ window {
 #outer-box {
     margin: 0;
     padding: 14px;
-    background-color: rgba(255, 255, 255, 0.24);
-    border: 1px solid rgba(255, 255, 255, 0.38);
+    background-color: rgba(190, 240, 210, 0.22);
+    border: 1px solid rgba(190, 240, 210, 0.60);
     border-radius: 18px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
 }
@@ -30,15 +30,15 @@ window {
 #input {
     margin-bottom: 10px;
     padding: 10px 14px;
-    background-color: rgba(255, 255, 255, 0.10);
-    border: 1px solid rgba(255, 255, 255, 0.22);
+    background-color: rgba(190, 240, 210, 0.16);
+    border: 1px solid rgba(190, 240, 210, 0.55);
     border-radius: 12px;
     color: rgba(255, 255, 255, 0.98);
     caret-color: rgba(255, 255, 255, 0.9);
 }
 
 #input:focus {
-    border-color: rgba(255, 255, 255, 0.45);
+    border-color: rgba(200, 255, 220, 0.90);
     box-shadow: none;
     outline: none;
 }
@@ -67,8 +67,8 @@ window {
 }
 
 #entry:selected {
-    background-color: rgba(255, 255, 255, 0.22);
-    border: 1px solid rgba(255, 255, 255, 0.35);
+    background-color: rgba(200, 255, 220, 0.26);
+    border: 1px solid rgba(200, 255, 220, 0.55);
 }
 
 #entry:selected #text {

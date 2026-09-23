@@ -455,15 +455,15 @@ class App:
         return humanize_ago((time.time() if now is None else now) - ts)
 
     def menu_lines(self, now: float | None = None) -> list[str]:
-        """One aligned line per meta: `●  taxes     current`, most recent first."""
+        """One aligned line per meta, most recently opened first.
+
+        The current meta is left out: the top entry is then the previous one, so
+        opening the picker and pressing Enter switches back to it.
+        """
         cur = self.current_name()
-        names = self.store.ordered()
+        names = [n for n in self.store.ordered() if n != cur]
         width = max((len(n) for n in names), default=0) + 3
-        lines = []
-        for name in names:
-            glyph = GLYPH_CURRENT if name == cur else GLYPH_OTHER
-            age = "current" if name == cur else self.age_label(name, now)
-            lines.append(f"{glyph}  {name:<{width}}{age}")
+        lines = [f"{name:<{width}}{self.age_label(name, now)}" for name in names]
         lines.append(NEW_ENTRY)
         return lines
 

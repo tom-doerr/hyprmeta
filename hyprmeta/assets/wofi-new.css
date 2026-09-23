@@ -1,7 +1,7 @@
-/* hyprmeta "name the new meta workspace" dialog: same glass as wofi.css, mint
- * tint, no list. SELF-CONTAINED on purpose: wofi feeds the stylesheet to GTK
- * from memory, so a relative @import of wofi.css does not resolve. Keep the
- * first part in sync with wofi.css (tests check it). */
+/* hyprmeta "name the new meta workspace" dialog: same mint glass as wofi.css,
+ * no search icon, a dim hint row instead of a list. SELF-CONTAINED on purpose:
+ * wofi feeds the stylesheet to GTK from memory, so a relative @import of wofi.css
+ * does not resolve. The first part must stay in sync with wofi.css (tests check). */
 
 * {
     font-family: "JetBrains Mono", "Iosevka", monospace;
@@ -19,8 +19,8 @@ window {
 #outer-box {
     margin: 0;
     padding: 14px;
-    background-color: rgba(255, 255, 255, 0.24);
-    border: 1px solid rgba(255, 255, 255, 0.38);
+    background-color: rgba(190, 240, 210, 0.22);
+    border: 1px solid rgba(190, 240, 210, 0.60);
     border-radius: 18px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
 }
@@ -28,15 +28,15 @@ window {
 #input {
     margin-bottom: 10px;
     padding: 10px 14px;
-    background-color: rgba(255, 255, 255, 0.10);
-    border: 1px solid rgba(255, 255, 255, 0.22);
+    background-color: rgba(190, 240, 210, 0.16);
+    border: 1px solid rgba(190, 240, 210, 0.55);
     border-radius: 12px;
     color: rgba(255, 255, 255, 0.98);
     caret-color: rgba(255, 255, 255, 0.9);
 }
 
 #input:focus {
-    border-color: rgba(255, 255, 255, 0.45);
+    border-color: rgba(200, 255, 220, 0.90);
     box-shadow: none;
     outline: none;
 }
@@ -65,8 +65,8 @@ window {
 }
 
 #entry:selected {
-    background-color: rgba(255, 255, 255, 0.22);
-    border: 1px solid rgba(255, 255, 255, 0.35);
+    background-color: rgba(200, 255, 220, 0.26);
+    border: 1px solid rgba(200, 255, 220, 0.55);
 }
 
 #entry:selected #text {
@@ -79,25 +79,23 @@ window {
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
-/* ---- mint overrides ---------------------------------------------------- */
+/* ---- new-name overrides -------------------------------------------------- */
 
-#outer-box {
-    background-color: rgba(190, 240, 210, 0.22);
-    border: 1px solid rgba(190, 240, 210, 0.60);
+/* No magnifier: this is not a search. */
+#input image {
+    -gtk-icon-source: none;
+    -gtk-icon-transform: scale(0);
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
 }
 
 #input {
-    background-color: rgba(190, 240, 210, 0.16);
-    border: 1px solid rgba(190, 240, 210, 0.55);
     margin-bottom: 0;
 }
 
-#input:focus {
-    border-color: rgba(200, 255, 220, 0.9);
-}
-
 #scroll {
-    min-height: 0;
     margin: 0;
     padding: 0;
 }

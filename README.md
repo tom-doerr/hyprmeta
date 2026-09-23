@@ -117,11 +117,15 @@ windowrule {
 
 ## Picker behaviour
 
-- Entries are ordered by when you last opened them, most recent first; the
-  current one is marked `●`. Each line shows the name and how long ago it was
-  opened (`just now`, `5 min ago`, `3 h ago`, `2 d ago`, …), never the
-  workspace numbers — those are an implementation detail (`hyprmeta list` has
-  them).
+- Entries are ordered by when you last opened them, most recent first, and the
+  **current one is left out** — so the top line is the one you came from, and
+  opening the picker and pressing Enter jumps straight back to it. Each line
+  shows the name and how long ago it was opened (`just now`, `5 min ago`,
+  `3 h ago`, `2 d ago`, …), never the workspace numbers — those are an
+  implementation detail (`hyprmeta list` has them).
+- The new-name dialog uses the same mint glass but has no search icon, a
+  `＋ name for the new meta workspace` prompt and a dim hint row, so it never
+  reads as a search box.
 - Selecting `+ new meta workspace` prompts for a name and creates it at the next
   free offset.
 - Typing a name that matches nothing and confirming it also creates it (menus
