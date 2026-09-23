@@ -56,8 +56,9 @@ TAG_RUNNING = "agent-running"
 OUR_TAGS = frozenset({TAG_DONE, TAG_RUNNING})
 
 COLOR_RUNNING = "#a6e3a1"
-COLOR_DONE = "#f9e2af"
-COLOR_WAITING = "#fab387"
+# Unread states are BLUE, never yellow/orange: those read as warnings (user decision).
+COLOR_DONE = "#89b4fa"
+COLOR_WAITING = "#89b4fa"  # same family; the `!` glyph tells waiting from finished
 COLOR_IDLE = "#9399b2"
 COLOR_DIM = "#7f849c"
 COLOR_CURRENT = "#cdd6f4"

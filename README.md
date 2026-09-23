@@ -141,12 +141,12 @@ It shows up in three places, with the same markers everywhere:
 windowrule {
     name = agent-done
     match:tag = agent-done
-    border_color = v0.52-drops-this rgb(f9e2af) rgb(fab387)   # active, inactive
+    border_color = v0.52-drops-this rgb(89b4fa) rgb(89b4fa)   # active, inactive (blue = unread)
 }
 windowrule {
     name = agent-done-revert
     match:tag = agent-done
-    border_color = v0.52-drops-this rgb(f9e2af)               # records the tag dependency
+    border_color = v0.52-drops-this rgb(89b4fa)               # records the tag dependency
 }
 # … the same pair for agent-running (e.g. rgba(33ccffee) rgba(a6e3a1bb)).
 # On a Hyprland whose parser is fixed: one rule per tag, no placeholder token.

@@ -258,6 +258,9 @@ def test_marks_use_unambiguous_glyphs():
     m = ag.marks_markup({"running": 1, "done": 2, "waiting": 1, "idle": 3})
     assert "⟳1" in m and "✓2" in m and "!1" in m and "○3" in m
     assert "·" not in m  # read as a minus sign from a distance
+    # unread states are blue: yellow/orange read as warnings (user decision)
+    assert ag.COLOR_DONE == ag.COLOR_WAITING == "#89b4fa"
+    assert "#f9e2af" not in m and "#fab387" not in m
     assert ag.marks_markup({"running": 0, "idle": 0}) == ""
 
 
