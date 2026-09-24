@@ -34,6 +34,8 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   the daemon's memory alone). Hyprland 0.52 needs TWO `border_color` rules per tag —
   see README "Window borders" for the three parser bugs.
 - Manual end-to-end test: a Python fake that sets comm via `prctl(PR_SET_NAME,
-  b"claude")` and writes OSC 0 titles; ghostty only starts a `-e` command once its
-  surface is visible (flash it floating + `no_initial_focus`, then
-  `movetoworkspacesilent`). `pgrep -f` matches your own shell — match comm instead.
+  b"claude")` and writes OSC 0 titles. Open the test terminal SMALL and floating
+  (`[float; size 360 110; no_initial_focus]`), then `movetoworkspacesilent`: a full-size
+  tile can fail to map when the GB10 scanout carveout is full (kernel `NV_ERR_NO_MEMORY`),
+  and ghostty starts its command only after its first frame. (NOT a visibility rule, as
+  first assumed.) `pgrep -f` matches your own shell — match comm instead.
