@@ -44,6 +44,12 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   on hidden ws 99 mapped in 1 s, no child after 5 s; Alacritty spawns at once); and a LARGE
   new window can fail to map at all when the GB10 scanout carveout is full (kernel
   `NV_ERR_NO_MEMORY`). `pgrep -f` matches your own shell — match comm instead.
+- **A `float; size` rule does NOT make a window's FIRST frame small.** Hyprland (0.52) sends
+  the first configure from `predictSizeForNewWindow` = a split of the FOCUSED window, before
+  any window rule is read (static rules are read at map). GTK 4.14 renders that first frame at
+  ceil(mode width / logical width), which is 3x on rotated 1.25 monitors, and never retries a
+  failed frame (it waits for a frame callback that needs a commit). Verify with
+  `WAYLAND_DEBUG=1` and the `create_immed(..., w, h, ...)` lines.
 
 ## Layout snapshots + restore (`layout.py`, `restore.py`)
 
@@ -53,7 +59,8 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   driven by the injectable `_stat/_cmdline/_cwd` so the fake-/proc tests keep working.
 - One dir per Hyprland INSTANCE (start time + signature): a crash-reboot must never overwrite
   the pre-crash state; `--from previous` reads the last dir that is not this instance.
-- Restore order is load-bearing: launch small+floating on park ws 99 → SHOW ws 99 until every
+- Restore order is load-bearing (the small float only sizes the window AFTER map; its first
+  frame still follows the focused window's tile, see above): launch small+floating on park ws 99 → SHOW ws 99 until every
   terminal's program has started (ghostty renders-before-spawn) → arrange (guillotine tree +
   verified re-insert, ported from `~/display-freeze-2026-08-17/restore_layout_aug17.py`) →
   `restore_view()` → refocus the caller's own terminal. `force_split=2` only during arrange,
