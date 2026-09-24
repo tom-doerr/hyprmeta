@@ -740,6 +740,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("agents", help="agent status per meta workspace (from the daemon's snapshot)")
     s.add_argument("--waybar", action="store_true", help="print a waybar custom-module JSON line")
     s.add_argument("--follow", action="store_true", help="with --waybar: keep printing when the snapshot changes")
+    s.add_argument("--row", action="store_true", help="with --waybar: all metas on one line (horizontal bar)")
 
     s = sub.add_parser("goto", help="workspace N relative to the current meta (for Super+N binds)")
     s.add_argument("n", type=int)
@@ -803,7 +804,7 @@ def cmd_agents(args: argparse.Namespace) -> int:
             else:
                 # picker order (most recently opened first), current meta included
                 names = Store.load(state_path()).ordered() or order
-                line = render_waybar(snap, names)
+                line = render_waybar(snap, names, row=args.row)
             print(json.dumps(line), flush=True)
         if not args.follow:
             return 0

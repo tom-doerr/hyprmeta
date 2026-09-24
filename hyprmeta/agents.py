@@ -504,11 +504,16 @@ def marks_markup(m: dict) -> str:
     return " ".join(f'<span foreground="{color}">{_esc(text)}</span>' for text, color in marks_parts(m))
 
 
-def render_waybar(snapshot: dict, order: list[str]) -> dict:
+ROW_SEP = f'  <span foreground="{COLOR_DIM}">│</span>  '
+
+
+def render_waybar(snapshot: dict, order: list[str], row: bool = False) -> dict:
     """One line per meta: markers right-aligned in a column, then the name.
 
     Right-aligning puts each row's markers directly against its own name while
     the names still form one column (user request: see what belongs to what).
+    row=True puts every meta on ONE line instead, for a horizontal bar: same
+    markers and names, no alignment padding, separated by a dim bar.
     """
     metas = snapshot.get("metas", {})
     current = snapshot.get("current_meta")
@@ -521,8 +526,12 @@ def render_waybar(snapshot: dict, order: list[str]) -> dict:
             label = f'<span foreground="{COLOR_CURRENT}" weight="bold">{_esc(name)}</span>'
         else:
             label = f'<span foreground="{COLOR_DIM}">{_esc(name)}</span>'
-        pad = " " * (col - len(marks_text(m)))
-        lines.append(f"{pad}{marks_markup(m)}{' ' if col else ''}{label}")
+        if row:
+            marks = marks_markup(m)
+            lines.append(f"{marks} {label}" if marks else label)
+        else:
+            pad = " " * (col - len(marks_text(m)))
+            lines.append(f"{pad}{marks_markup(m)}{' ' if col else ''}{label}")
         attention = attention or bool(m.get("done") or m.get("waiting"))
         running = running or bool(m.get("running"))
         tips.append(
@@ -531,4 +540,4 @@ def render_waybar(snapshot: dict, order: list[str]) -> dict:
         )
     tips.append(LEGEND)
     cls = "attention" if attention else ("running" if running else "idle")
-    return {"text": "\n".join(lines), "tooltip": "\n".join(tips), "class": cls}
+    return {"text": (ROW_SEP if row else "\n").join(lines), "tooltip": "\n".join(tips), "class": cls}

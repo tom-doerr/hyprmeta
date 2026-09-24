@@ -291,3 +291,20 @@ def test_render_waybar_lines_and_class():
     assert out["class"] == "attention"
     snap["metas"]["legal"]["done"] = 0
     assert ag.render_waybar(snap, ["taxes"])["class"] == "running"
+
+
+def test_render_waybar_row_is_one_line():
+    snap = {
+        "metas": {
+            "taxes": {"running": 1, "done": 0, "waiting": 0, "idle": 1, "agents": 2, "windows": 3},
+            "home": {"running": 0, "done": 0, "waiting": 0, "idle": 1, "agents": 1, "windows": 5},
+            "empty": {"running": 0, "done": 0, "waiting": 0, "idle": 0, "agents": 0, "windows": 0},
+        },
+        "current_meta": "home",
+    }
+    out = ag.render_waybar(snap, ["home", "taxes", "empty"], row=True)
+    assert "\n" not in out["text"]
+    # no alignment padding in a row; a meta without agents is just its name
+    assert re.sub(r"<[^>]+>", "", out["text"]) == "○1 home  │  ▶1 ○1 taxes  │  empty"
+    assert out["class"] == "running"
+    assert out["tooltip"] == ag.render_waybar(snap, ["home", "taxes", "empty"])["tooltip"]
