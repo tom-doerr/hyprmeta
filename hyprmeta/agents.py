@@ -13,6 +13,13 @@ Signals, cheapest first (no hooks):
                                            `[ ! ] Action Required | …` (waiting)
   ===========  ==========================  ====================================
 
+* Web agents (a ChatGPT tab, via the extension in `contrib/chatgpt-status/`): a
+  browser has no process per chat, so the WINDOW TITLE is the whole signal. The
+  page prefixes its title with the invisible U+2063 (`WEB_TAG`) — idle — and with
+  `⏳` + `WEB_TAG` while a reply generates. The browser window title is the active
+  tab's, so this sees a chat that is its window's active tab. When the tag
+  vanishes (tab switched, navigated away) the agent is dropped WITHOUT a finish
+  stamp: not being able to see it is not an exit.
 * Codex fallback when its title says nothing: the NEWEST rollout `.jsonl` among
   the files the process holds open (`/proc/<pid>/fd` — a process holds several,
   including stale sessions); its last task event decides.
@@ -48,6 +55,9 @@ CLAUDE_IDLE = "✳"
 SPINNERS = frozenset("◐◓◑◒✢✶✻✽") | frozenset(chr(c) for c in range(0x2801, 0x2900))
 ACTION_REQUIRED = re.compile(r"^\[\s*\S\s*\]\s*Action Required")
 CODEX_IDLE_TITLE = re.compile(r"^[^|]*\S \| \S")
+WEB_KIND = "web"
+WEB_TAG = "⁣"  # INVISIBLE SEPARATOR: survives into the Wayland title (verified with Chromium)
+WEB_RUNNING = "⏳"
 CODEX_RUNNING_EVENTS = frozenset({"task_started", "user_message"})
 CODEX_STOPPED_EVENTS = frozenset({"task_complete", "turn_aborted"})
 
@@ -86,6 +96,15 @@ def title_state(kind: str, title: str) -> str | None:
     if kind == "claude" and t[0] == CLAUDE_IDLE:
         return "idle"
     if kind == "codex" and CODEX_IDLE_TITLE.match(t):
+        return "idle"
+    return None
+
+
+def web_title_state(title: str) -> str | None:
+    """`running` / `idle` for a window whose title carries the web-agent tag, else None."""
+    if title.startswith(WEB_RUNNING + WEB_TAG):
+        return "running"
+    if title.startswith(WEB_TAG):
         return "idle"
     return None
 
@@ -217,7 +236,7 @@ def default_state_of(kind: str, pids: list[int], title: str) -> str | None:
 
 @dataclass
 class Agent:
-    kind: str  # claude | codex
+    kind: str  # claude | codex | web
     pids: list[int]
     state: str | None = None  # running | idle | waiting | None (title says nothing)
     since: float = 0.0  # when `state` began
@@ -293,6 +312,17 @@ class AgentTracker:
         w.finished_by, w.finish_state = kind, how
         self.events.append(f"{kind} {how} in {w.address} (ws {w.workspace}, meta {w.meta}): {w.title[:60]!r}")
 
+    def _sync_web(self, w: WindowState, now: float) -> None:
+        """The web agent exists exactly while the title carries WEB_TAG (see module doc)."""
+        state = web_title_state(w.title)
+        if state is None:
+            w.agents.pop(WEB_KIND, None)  # unobservable, not exited: no stamp
+            return
+        a = w.agents.get(WEB_KIND)
+        if a is None:
+            a = w.agents[WEB_KIND] = Agent(WEB_KIND, [w.pid], None, now)
+        self._observe(w, a, state, now)
+
     def needs_attention(self, w: WindowState) -> bool:
         return w.finish_ts > w.last_focus_ts and w.address != self.focused and w.running == 0
 
@@ -316,9 +346,12 @@ class AgentTracker:
             return
         w.title = title
         for a in w.agents.values():
+            if a.kind == WEB_KIND:
+                continue
             state = title_state(a.kind, title)
             if state is not None:
                 self._observe(w, a, state, now)
+        self._sync_web(w, now)
 
     def set_current_meta(self, name: str | None) -> None:
         self.current_meta = name  # display only; showing a meta clears nothing
@@ -360,7 +393,8 @@ class AgentTracker:
                 grouped.setdefault(by_pid[wpid], {}).setdefault(kind, []).append(pid)
         for addr, w in self.windows.items():
             kinds = grouped.get(addr, {})
-            for kind in [k for k in w.agents if k not in kinds]:
+            self._sync_web(w, now)  # title-only agent: never part of the process reconciliation
+            for kind in [k for k in w.agents if k not in kinds and k != WEB_KIND]:
                 if w.agents[kind].armed:  # died or quit while working
                     self._stamp(w, kind, "exited", now)
                 del w.agents[kind]

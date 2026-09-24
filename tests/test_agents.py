@@ -373,3 +373,78 @@ def test_wrap_is_rejected_where_it_would_be_ignored():
 
     assert cli.main(["agents", "--waybar", "--wrap", "80"]) == 1  # no --row
     assert cli.main(["agents", "--waybar", "--row", "--wrap", "-1"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# web agents (ChatGPT tab via contrib/chatgpt-status): the title is the whole signal
+# --------------------------------------------------------------------------- #
+
+WEB_IDLE = ag.WEB_TAG + "Antwortschreiben prüfen - Chromium"
+WEB_BUSY = ag.WEB_RUNNING + ag.WEB_TAG + "Antwortschreiben prüfen - Chromium"
+
+
+def test_web_title_state():
+    assert ag.web_title_state(WEB_BUSY) == "running"
+    assert ag.web_title_state(WEB_IDLE) == "idle"
+    assert ag.web_title_state("Antwortschreiben prüfen - Chromium") is None
+    assert ag.web_title_state("⏳ a page with an hourglass - Chromium") is None  # no tag, not ours
+    assert ag.web_title_state("✳ claude in a terminal") is None
+
+
+@pytest.fixture
+def web_world(world):
+    """The same world plus a browser window 0xweb (pid 500, ws 35 = legal) showing a chat."""
+    t, state, scan = world
+    state["titles"]["0xweb"] = WEB_BUSY
+
+    def clients():
+        return [client("0xa", 100, 14, state["titles"]["0xa"], state["focused"] == "0xa"),
+                client("0xme", 101, 5, state["titles"]["0xme"], state["focused"] == "0xme"),
+                client("0xweb", 500, 35, state["titles"]["0xweb"], state["focused"] == "0xweb")]
+
+    def web_scan(now):
+        t.update(clients(), state["agents"], now,
+                 state_of=lambda kind, pids, title: ag.title_state(kind, title))
+
+    return t, state, web_scan
+
+
+def test_web_chat_finishes_like_a_terminal_agent(web_world):
+    t, state, scan = web_world
+    scan(1001.0)
+    assert t.meta_summary()["legal"]["running"] == 1
+    assert t.tags_wanted()["0xweb"] == {ag.TAG_RUNNING}
+
+    t.set_title("0xweb", WEB_IDLE, 1002.0)  # reply done
+    state["titles"]["0xweb"] = WEB_IDLE
+    t.tick(1005.5)
+    w = t.windows["0xweb"]
+    assert (w.finish_ts, w.finished_by, w.finish_state) == (1002.0, "web", "idle")
+    assert t.meta_summary()["legal"] == {"running": 0, "done": 1, "waiting": 0, "idle": 0, "agents": 1, "windows": 1}
+    scan(1006.0)  # a full rescan keeps the title-only agent and invents no exit
+    assert list(w.agents) == ["web"] and w.finish_ts == 1002.0
+    t.focus("0xweb", 1010.0)
+    assert t.meta_summary()["legal"]["idle"] == 1
+
+
+def test_web_tag_vanishing_drops_the_agent_without_a_finish(web_world):
+    t, state, scan = web_world
+    scan(1001.0)
+    # another tab became active in that window mid-reply: unobservable, not exited
+    t.set_title("0xweb", "Telegram Web - Chromium", 1002.0)
+    t.tick(1010.0)
+    state["titles"]["0xweb"] = "Telegram Web - Chromium"
+    scan(1011.0)
+    w = t.windows["0xweb"]
+    assert w.agents == {} and w.finish_ts == 0.0
+    assert t.meta_summary()["legal"]["agents"] == 0
+    # back to the chat tab: tracked again from its current state
+    t.set_title("0xweb", WEB_BUSY, 1012.0)
+    assert t.meta_summary()["legal"]["running"] == 1
+
+
+def test_a_web_tag_never_turns_a_terminal_agent_into_two(web_world):
+    t, state, scan = web_world
+    scan(1001.0)
+    assert list(t.windows["0xa"].agents) == ["claude"]
+    assert list(t.windows["0xweb"].agents) == ["web"]

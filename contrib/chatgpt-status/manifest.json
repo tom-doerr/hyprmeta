@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "hyprmeta ChatGPT status",
+  "version": "0.1.0",
+  "description": "Marks a ChatGPT tab's title while a reply is generating, so hyprmeta can track the chat like a terminal agent.",
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

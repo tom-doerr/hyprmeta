@@ -130,10 +130,23 @@ title change as an event, so no polling is involved:
 |---|---|---|
 | Claude Code | `◐◓◑◒` spinner prefix | `✳ <topic>` |
 | Codex | braille spinner `⠋⠙⠹…` | `<task> \| <dir>` (idle), `[ ! ] Action Required \| …` (waiting for approval) |
+| ChatGPT (web) | `⏳` + U+2063 prefix | U+2063 prefix (invisible) |
 
 When a Codex title says nothing, the newest rollout `.jsonl` the process holds
 open decides (`task_started` / `task_complete`). `/proc` ancestry ties each agent
 to its terminal window; Codex's `codex-linux-sandbox` helpers are skipped.
+
+**ChatGPT in the browser** has no process per chat, so the page itself has to
+say what it is doing. `contrib/chatgpt-status/` is a small Chromium extension
+(one content script on chatgpt.com, no permissions). While the composer shows its
+Stop button, it prefixes the tab title with `⏳` and the invisible U+2063, and
+with U+2063 alone otherwise. The browser passes the title on as the window
+title, so each chat window becomes an agent with the same markers, borders and
+"finished since you looked" flag as a terminal. Install it with
+`chrome://extensions` → Developer mode → **Load unpacked** → that directory,
+then reload the open ChatGPT tabs. Limits: a window's title is its ACTIVE tab's
+title, so keep a long-running chat as the active tab of its own window. Switching
+tabs just hides the chat; it never counts as a finish.
 
 **"Finished since you looked":** an agent seen working whose state then stays
 stopped for 3 s (title flicker never counts), or that exits while working,

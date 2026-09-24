@@ -33,6 +33,11 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
 - Waybar name colour is a USER DECISION too (`name_color`): the count-weighted sRGB mean
   of the NON-idle marker colours (2 working + 1 finished = ⅔ green + ⅓ blue); all idle =
   the idle colour; no agents = the old dim/bright. Bold alone marks the current meta.
+- Web agents (`WEB_KIND`, `contrib/chatgpt-status/`) are TITLE-ONLY: no process, so they
+  must stay out of the process reconciliation in `update()` (else every scan would "exit"
+  them) and a vanished `WEB_TAG` drops them WITHOUT a stamp. U+2063 survives Chromium →
+  Wayland title (verified Sep 24). The extension's Stop-button selector is the fragile part:
+  if ChatGPT changes its composer, only `content.js` needs updating.
 - Tags are reconciled against `hyprctl clients -j` tags every full scan (never trust
   the daemon's memory alone). Hyprland 0.52 needs TWO `border_color` rules per tag —
   see README "Window borders" for the three parser bugs.
