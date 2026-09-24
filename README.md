@@ -161,6 +161,8 @@ renders 3 px wider and shifts its row.
    prints one line per meta (markers right-aligned before the name, current
    meta in bold). Its class is
    `attention`, `running` or `idle` for CSS. See `contrib/waybar-meta.jsonc`.
+   Add `--row` to put every meta on one line instead, for a regular
+   horizontal bar.
 3. **Window borders**: the daemon tags terminals `agent-done` / `agent-running`
    (`tagwindow`, diffed every 2 s against the tags Hyprland really has) and
    window rules paint them:
