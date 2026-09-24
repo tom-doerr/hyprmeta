@@ -737,6 +737,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("daemon", help="run the resident GTK picker (global shortcuts hyprmeta:pick / pick-move)")
 
+    s = sub.add_parser("layout", help="snapshots of every window + what each terminal runs; restore them")
+    lsub = s.add_subparsers(dest="layout_cmd", required=True)
+    lsub.add_parser("save", help="snapshot now (the daemon also saves on every change)")
+    lsub.add_parser("list", help="saved snapshots, newest first")
+    ls = lsub.add_parser("show", help="where every window is and what each terminal runs")
+    ls.add_argument("--from", dest="source", default="live",
+                    help="live (default), latest, previous, a number from `hyprmeta layout list`, or a file")
+    lr = lsub.add_parser("restore", help="reopen missing terminals, resuming their sessions, and rebuild their workspaces")
+    lr.add_argument("--from", dest="source", default="previous",
+                    help="previous (default: the last state of the Hyprland session before this one), latest, "
+                         "a number from `hyprmeta layout list`, or a file")
+    lr.add_argument("--workspace", type=int, action="append", help="only this workspace (repeatable)")
+    lr.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
+
     s = sub.add_parser("agents", help="agent status per meta workspace (from the daemon's snapshot)")
     s.add_argument("--waybar", action="store_true", help="print a waybar custom-module JSON line")
     s.add_argument("--follow", action="store_true", help="with --waybar: keep printing when the snapshot changes")
@@ -811,6 +825,103 @@ def cmd_agents(args: argparse.Namespace) -> int:
         time.sleep(0.5)
 
 
+def _snapshot_source(source: str, hypr: Hypr) -> dict:
+    from . import layout
+
+    if source == "live":
+        return layout.take_snapshot(hypr)
+    inst = layout.current_instance(hypr)
+    if source == "latest":
+        path = layout.instance_dir({"instance": inst}) / "latest.json"
+    elif source.isdigit():
+        snaps = layout.list_snapshots()
+        if int(source) >= len(snaps):
+            raise HyprmetaError(f"only {len(snaps)} saved snapshots (see `hyprmeta layout list`)")
+        path = snaps[int(source)]
+    elif source == "previous":
+        path = layout.previous_instance_latest(inst["sig"])
+        if path is None:
+            raise HyprmetaError("no snapshot from a Hyprland session before this one; "
+                                "pick one with --from (see `hyprmeta layout list`)")
+    else:
+        path = Path(source)
+    if not path.exists():
+        raise HyprmetaError(f"no snapshot at {path}")
+    print(f"snapshot: {path}", file=sys.stderr)
+    return layout.load(path)
+
+
+def _my_window(hypr: Hypr) -> str | None:
+    """The terminal this command runs in, so a restore never moves it away."""
+    by_pid = {int(c.get("pid") or 0): c["address"] for c in hypr.clients()}
+    pid = os.getpid()
+    for _ in range(12):
+        if pid in by_pid:
+            return by_pid[pid]
+        try:
+            stat = open(f"/proc/{pid}/stat").read()
+            pid = int(stat[stat.rindex(")") + 2:].split()[1])
+        except (OSError, ValueError):
+            return None
+        if pid <= 1:
+            return None
+    return None
+
+
+def cmd_layout(args: argparse.Namespace, hypr: Hypr) -> int:
+    from . import layout
+
+    if args.layout_cmd == "save":
+        print(layout.save(layout.take_snapshot(hypr)))
+        return 0
+    if args.layout_cmd == "list":
+        for i, path in enumerate(layout.list_snapshots()[:40]):
+            snap = json.loads(path.read_text())
+            terms = sum(1 for w in snap["windows"] if w.get("terminal"))
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snap["ts"]))
+            print(f"{i:>3}  {when}  {len(snap['windows']):>3} windows {terms:>3} terminals  {path}")
+        return 0
+    snap = _snapshot_source(args.source, hypr)
+    cfg = Config.load(config_path())
+    store = Store.load(state_path())
+    meta_of = {b + off: name for name, off in store.metas.items() for b in cfg.base}
+    if args.layout_cmd == "show":
+        print(layout.format_snapshot(snap, meta_of))
+        return 0
+    # restore
+    from .restore import PARK_WS, Restorer, match_survivors
+
+    clients = hypr.clients()
+    survivors = match_survivors(snap, clients, set())
+    only = set(args.workspace) if args.workspace else None
+    plan = layout.plan_restore(snap, set(survivors), layout.live_sessions(), only)
+    print(layout.format_plan(plan))
+    if args.dry_run or not plan["launch"]:
+        print("dry run: nothing changed" if args.dry_run else "nothing to reopen")
+        return 0
+    r = Restorer(hypr)
+    addr_of = dict(survivors)
+    addr_of.update(r.launch(plan["launch"]))
+    mine = _my_window(hypr)
+    old = json.loads(hypr._run(["-j", "getoption", "dwindle:force_split"]))["int"]
+    hypr._run(["keyword", "dwindle:force_split", "2"])
+    try:
+        for ws in sorted({w["workspace"] for w in plan["launch"]} | (only or set())):
+            r.arrange(ws, [w for w in snap["windows"] if w["workspace"] == ws], addr_of, mine)
+    finally:
+        hypr._run(["keyword", "dwindle:force_split", str(old)])
+    r.restore_view()
+    if mine:
+        r.dispatch("focuswindow", f"address:{mine}")
+    print("\n".join(r.report) or "done")
+    if any(line.startswith("FAILED") for line in r.report):
+        return 1
+    parked = [c for c in hypr.clients() if c["workspace"]["id"] == PARK_WS]
+    if parked:
+        print(f"{len(parked)} window(s) left on the parking workspace {PARK_WS}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
     args = build_parser().parse_args(argv)
     hypr = hypr or Hypr()
@@ -823,6 +934,8 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             return run_daemon()
         if args.cmd == "agents":
             return cmd_agents(args)
+        if args.cmd == "layout":
+            return cmd_layout(args, hypr)
         if args.cmd == "pick" and not args.no_daemon:
             reply = daemon_send("show-move" if args.move else "toggle")
             if reply is not None:

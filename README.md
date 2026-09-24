@@ -194,6 +194,53 @@ the daemon logs every finish (`journalctl --user -u hyprmeta-daemon | grep finis
 Not covered: agents inside tmux, or over ssh. Their processes do not descend
 from the terminal window.
 
+## Layout snapshots: where every window is, what every terminal runs
+
+The daemon keeps a snapshot of the whole desktop on disk and updates it whenever
+a window opens, closes or moves, or a terminal starts running something else.
+Each window records its workspace, position, size, floating state and tab group.
+Each terminal (ghostty or Alacritty) also records its working directory and
+what runs in its foreground:
+
+| foreground | recorded as | how it comes back |
+|---|---|---|
+| idle shell | `shell` | a shell in the same directory |
+| a command (`btop`, `ssh -t nas 'tmux …'`) | its argv | the same command |
+| Claude Code | the session id from `~/.claude/sessions/<pid>.json` | `claude --resume <id>` |
+| Codex | the UUID of the newest rollout the process holds open | `codex resume <id>` |
+
+Agents and commands are started inside `zsh -ic '…; exec zsh -i'`, so the
+window keeps a shell when they exit.
+
+```sh
+hyprmeta layout show                # the live desktop, workspace by workspace
+hyprmeta layout list                # saved snapshots, numbered, newest first
+hyprmeta layout restore --dry-run   # what a restore would open, keep and skip
+hyprmeta layout restore             # reopen + resume + rebuild the tiling
+```
+
+Snapshots live in `~/.local/state/hyprmeta/layouts/<start>_<instance>/`: one
+directory per Hyprland session, so a crash-reboot can never overwrite the last
+pre-crash state. Each holds `latest.json`, a ring of the last 30 distinct states
+(undo for a window closed by mistake: `restore --from 1`), and one snapshot per
+10 minutes for two days. `restore` defaults to `--from previous`, the final
+state of the Hyprland session before this one. It also takes `latest`, a number
+from `layout list`, or a file.
+
+`restore` never resumes a session that is still running somewhere. It opens
+each missing terminal small and floating on a parking workspace (99), shows
+that workspace until every terminal's program has started, and then rebuilds
+each affected workspace. It infers the dwindle split tree from the saved
+rectangles, re-inserts the windows, verifying each split, rebuilds tab groups,
+and resizes to the saved sizes. Browser windows are not launched (they restore
+their own sessions); if one comes back with the same title, it is put back in its
+cell. `--workspace N` limits a restore to one workspace.
+
+Two ghostty facts shaped this. ghostty starts its program only after its
+surface first renders, and a hidden workspace never renders. On NVIDIA GB10
+machines, a new window's first buffer comes from a fixed scanout carveout, and
+a large one can fail to allocate while a small one fits.
+
 ## Menu-command fallback (wofi)
 
 ```ini
@@ -284,6 +331,10 @@ windowrule {
 | `move NAME [--follow]` | move the focused window to the same monitor slot in another meta |
 | `pick [--move] [--follow] [--menu CMD]` | fuzzy picker |
 | `goto N`, `moveto N [--silent]` | slot `N` relative to the current meta |
+| `daemon` | the resident picker + agent tracking + layout snapshots (run it as a user service) |
+| `agents [--waybar [--follow] [--row]]` | agent status per meta (the sidebar's data) |
+| `layout save` / `show [--from …]` / `list` | snapshot now / print one / list saved ones |
+| `layout restore [--from previous\|latest\|N\|FILE] [--workspace N] [--dry-run]` | reopen missing terminals, resume their sessions, rebuild their workspaces |
 
 ## How a switch works
 

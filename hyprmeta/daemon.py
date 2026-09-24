@@ -56,6 +56,7 @@ from .agents import (  # noqa: E402
     marks_markup,
     write_snapshot,
 )
+from . import layout  # noqa: E402
 from .preview import PreviewSession  # noqa: E402
 from .shortcuts import GlobalShortcuts  # noqa: E402
 
@@ -63,6 +64,8 @@ log = logging.getLogger("hyprmeta")
 
 SCAN_INTERVAL_MS = 2000  # full scan: new/exited agents, Codex rollouts, stop confirmation
 RESCAN_DEBOUNCE_MS = 150  # after a window opens, closes or moves
+SNAPSHOT_EVERY_SCANS = 5  # layout snapshot re-check every 10 s (+ after window open/close/move)
+PRUNE_EVERY_S = 3600
 
 NAMESPACE = "hyprmeta"
 WIDTH = 560
@@ -178,6 +181,11 @@ class Picker:
         self.session: PreviewSession | None = None
         self.previewing = False  # pick mode shows the selected meta live
         self._timer_id: int | None = None  # idle auto-commit
+        self._scans = 0
+        self._snapshot_due = True
+        self._layout_sig: str | None = None
+        self._instance: dict | None = None
+        self._pruned_at = 0.0
         self._build()
         self._setup_tracker()
 
@@ -499,6 +507,7 @@ class Picker:
             self._request_scan()
 
     def _request_scan(self) -> None:
+        self._snapshot_due = True  # a window opened, closed or moved: the layout changed
         if not self._scan_pending:
             self._scan_pending = True
             GLib.timeout_add(RESCAN_DEBOUNCE_MS, self._scan_once)
@@ -531,6 +540,27 @@ class Picker:
         # manual tag can never leave a stale border behind.
         self._tags = actual_tags(clients)
         self._publish(write=restore is not None or self.tracker.visible_state() != before)
+        self._scans += 1
+        if self._snapshot_due or self._scans % SNAPSHOT_EVERY_SCANS == 0:
+            self._save_layout(clients)
+
+    def _save_layout(self, clients: list[dict]) -> None:
+        """Keep ~/.local/state/hyprmeta/layouts current: written only when the layout
+        or what a terminal runs changed (titles and spinner frames do not count)."""
+        self._snapshot_due = False
+        try:
+            if self._instance is None:
+                self._instance = layout.current_instance(self.hypr)
+            snap = layout.take_snapshot(self.hypr, clients=clients, instance=self._instance)
+            sig = layout.signature(snap)
+            if sig != self._layout_sig:
+                layout.save(snap)
+                self._layout_sig = sig
+            if time.time() - self._pruned_at > PRUNE_EVERY_S:
+                layout.prune()
+                self._pruned_at = time.time()
+        except (HyprmetaError, OSError, ValueError) as exc:
+            log.warning("layout snapshot failed: %s", exc)
 
     def _publish(self, write: bool) -> None:
         assert self.tracker is not None

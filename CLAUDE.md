@@ -34,8 +34,26 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   the daemon's memory alone). Hyprland 0.52 needs TWO `border_color` rules per tag —
   see README "Window borders" for the three parser bugs.
 - Manual end-to-end test: a Python fake that sets comm via `prctl(PR_SET_NAME,
-  b"claude")` and writes OSC 0 titles. Open the test terminal SMALL and floating
-  (`[float; size 360 110; no_initial_focus]`), then `movetoworkspacesilent`: a full-size
-  tile can fail to map when the GB10 scanout carveout is full (kernel `NV_ERR_NO_MEMORY`),
-  and ghostty starts its command only after its first frame. (NOT a visibility rule, as
-  first assumed.) `pgrep -f` matches your own shell — match comm instead.
+  b"claude")` and writes OSC 0 titles. Open the test terminal SMALL, floating and VISIBLE
+  (`[workspace <visible> silent; float; size 360 110; no_initial_focus]`), then
+  `movetoworkspacesilent`. BOTH traps are real (verified Sep 24): ghostty starts its command
+  only after its surface first RENDERS, and a hidden workspace never renders (a small ghostty
+  on hidden ws 99 mapped in 1 s, no child after 5 s; Alacritty spawns at once); and a LARGE
+  new window can fail to map at all when the GB10 scanout carveout is full (kernel
+  `NV_ERR_NO_MEMORY`). `pgrep -f` matches your own shell — match comm instead.
+
+## Layout snapshots + restore (`layout.py`, `restore.py`)
+
+- Terminal foreground = the shell's `tpgid` (ghostty: ghostty → `sh -c zsh` → zsh; Alacritty:
+  zsh directly). Claude session = `~/.claude/sessions/<pid>.json` (sessionId + cwd); Codex =
+  UUID of the NEWEST open rollout (a process holds stale ones too). Keep `inspect_terminal`
+  driven by the injectable `_stat/_cmdline/_cwd` so the fake-/proc tests keep working.
+- One dir per Hyprland INSTANCE (start time + signature): a crash-reboot must never overwrite
+  the pre-crash state; `--from previous` reads the last dir that is not this instance.
+- Restore order is load-bearing: launch small+floating on park ws 99 → SHOW ws 99 until every
+  terminal's program has started (ghostty renders-before-spawn) → arrange (guillotine tree +
+  verified re-insert, ported from `~/display-freeze-2026-08-17/restore_layout_aug17.py`) →
+  `restore_view()` → refocus the caller's own terminal. `force_split=2` only during arrange,
+  restored in `finally`. Never resume a session that is live (`live_sessions()`).
+- The ARRANGE step moves focus and switches workspaces: never run it for a test while the user
+  may be typing. Launch-only tests on the hidden park ws are safe (no focus change).
