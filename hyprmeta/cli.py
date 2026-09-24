@@ -90,15 +90,24 @@ class Hypr:
         raw = json.loads(self._run(["-j", "workspaces"]))
         return {int(w["id"]): w["monitor"] for w in raw}
 
+    def _monitor_name(self, monitor_id: int) -> str:
+        # clients / activewindow report the monitor ID; dispatchers want the name.
+        for m in json.loads(self._run(["-j", "monitors"])):
+            if int(m["id"]) == monitor_id:
+                return str(m["name"])
+        raise HyprmetaError(f"window is on unknown monitor id {monitor_id}")
+
     def active_window_monitor(self) -> str:
         raw = json.loads(self._run(["-j", "activewindow"]))
         if not raw or "monitor" not in raw:
             raise HyprmetaError("no focused window")
-        # activewindow reports the monitor id, not its name.
-        for m in json.loads(self._run(["-j", "monitors"])):
-            if int(m["id"]) == int(raw["monitor"]):
-                return str(m["name"])
-        raise HyprmetaError(f"focused window is on unknown monitor id {raw['monitor']}")
+        return self._monitor_name(int(raw["monitor"]))
+
+    def window_monitor(self, address: str) -> str:
+        c = next((c for c in self.clients() if c.get("address") == address), None)
+        if c is None:
+            raise HyprmetaError(f"no window with address {address}")
+        return self._monitor_name(int(c["monitor"]))
 
     def cursor(self) -> tuple[int, int]:
         text = self._run(["cursorpos"]).strip()
@@ -161,6 +170,9 @@ class Config:
     step: int = 10
     menu: str = DEFAULT_MENU
     menu_new: str = DEFAULT_MENU_NEW
+    # Resident picker: with no input for this long, the previewed meta becomes
+    # the real switch and the picker closes. 0 = never auto-close.
+    auto_commit_s: float = 1.0
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -176,18 +188,23 @@ class Config:
         step = int(data.get("step", 10))
         if step <= 0:
             raise HyprmetaError(f"{path}: `step` must be positive")
+        auto_commit_s = float(data.get("auto_commit_s", 1.0))
+        if auto_commit_s < 0:
+            raise HyprmetaError(f"{path}: `auto_commit_s` must be >= 0 (0 disables it)")
         return cls(
             base=base,
             step=step,
             menu=str(data.get("menu", DEFAULT_MENU)),
             menu_new=str(data.get("menu_new", DEFAULT_MENU_NEW)),
+            auto_commit_s=auto_commit_s,
         )
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
-                {"base": self.base, "step": self.step, "menu": self.menu, "menu_new": self.menu_new},
+                {"base": self.base, "step": self.step, "menu": self.menu, "menu_new": self.menu_new,
+                 "auto_commit_s": self.auto_commit_s},
                 indent=2,
             )
             + "\n"
@@ -453,11 +470,16 @@ class App:
             raise HyprmetaError("no previous meta workspace to switch back to")
         return self.store.recent[1]
 
-    def switch(self, name: str) -> list[int]:
-        name = self.resolve(name)
-        offset = self.store.offset(name)
+    def show_workspaces(self, targets: Sequence[int]) -> None:
+        """Put workspace targets[i] on monitor i (left to right) in ONE hyprctl batch.
+
+        Monitors already showing their target are skipped; focus returns to the
+        monitor that had it and the cursor to where it was, so only the
+        workspaces change.
+        """
         mons = self.monitors()
-        targets = self.workspaces_for(offset)
+        if len(targets) != len(mons):
+            raise HyprmetaError(f"{len(targets)} target workspaces for {len(mons)} monitors")
         focused = next((m for m in mons if m.focused), mons[0])
         cx, cy = self.hypr.cursor()
 
@@ -474,19 +496,35 @@ class App:
             dispatches.append(f"movecursor {cx} {cy}")
         self.hypr.batch(dispatches)
 
-        self.store.touch(name)
-        self.store.save(self.store_file)
+    def switch(self, name: str, record: bool = True) -> list[int]:
+        """Show meta `name` on every monitor. `record=False` = a picker preview:
+        shown, but NOT counted as opened (no MRU / last-opened update)."""
+        name = self.resolve(name)
+        targets = self.workspaces_for(self.store.offset(name))
+        self.show_workspaces(targets)
+        if record:
+            self.store.touch(name)
+            self.store.save(self.store_file)
         return targets
 
-    def move_window(self, name: str, follow: bool = False) -> int:
+    def move_window(self, name: str, follow: bool = False, address: str | None = None) -> int:
+        """Move a window to the same monitor slot in meta `name`.
+
+        `address` pins the window (the picker passes the one that was focused
+        when it opened); without it the currently focused window moves.
+        """
         offset = self.store.offset(name)
         mons = self.monitors()
-        mon_name = self.hypr.active_window_monitor()
+        if address is None:
+            mon_name = self.hypr.active_window_monitor()
+        else:
+            mon_name = self.hypr.window_monitor(address)
         slot = next((i for i, m in enumerate(mons) if m.name == mon_name), None)
         if slot is None:
-            raise HyprmetaError(f"focused window's monitor {mon_name!r} is not in the layout")
+            raise HyprmetaError(f"the window's monitor {mon_name!r} is not in the layout")
         ws = self.cfg.base[slot] + offset
-        self.hypr.batch([f"movetoworkspacesilent {ws}"])
+        target = f"{ws},address:{address}" if address else f"{ws}"
+        self.hypr.batch([f"movetoworkspacesilent {target}"])
         if follow:
             self.switch(name)
         return ws

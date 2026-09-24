@@ -10,7 +10,7 @@ from hyprmeta.cli import App, Config, Hypr, HyprmetaError, Store
 class FakeHyprctl:
     """Answers `hyprctl -j monitors/workspaces/activewindow`, records batches."""
 
-    def __init__(self, active=(4, 5, 6), focused="DP-2", ws_monitors=None, cursor=(100, 200)):
+    def __init__(self, active=(4, 5, 6), focused="DP-2", ws_monitors=None, cursor=(100, 200), simulate=False):
         self.names = ["DP-1", "DP-2", "HDMI-A-1"]
         self.active = dict(zip(self.names, active))
         self.focused = focused
@@ -18,6 +18,8 @@ class FakeHyprctl:
         self.cursor = cursor
         self.batches: list[list[str]] = []
         self.active_window_monitor_id = 1
+        self.clients = [{"address": "0xw", "monitor": 2, "workspace": {"id": 6}}]
+        self.simulate = simulate  # apply focusmonitor / focusworkspaceoncurrentmonitor to `active`
 
     def __call__(self, args):
         args = list(args)
@@ -42,8 +44,20 @@ class FakeHyprctl:
             return json.dumps({"monitor": self.active_window_monitor_id})
         if args == ["cursorpos"]:
             return f"{self.cursor[0]}, {self.cursor[1]}"
+        if args[:2] == ["-j", "clients"]:
+            return json.dumps(self.clients)
         if args[0] == "--batch":
-            self.batches.append([d.removeprefix("dispatch ") for d in args[1].split("; ")])
+            batch = [d.removeprefix("dispatch ") for d in args[1].split("; ")]
+            self.batches.append(batch)
+            if self.simulate:
+                cur = self.focused
+                for d in batch:
+                    verb, _, arg = d.partition(" ")
+                    if verb == "focusmonitor":
+                        cur = arg
+                    elif verb == "focusworkspaceoncurrentmonitor":
+                        self.active[cur] = int(arg)
+                self.focused = cur
             return "ok"
         raise AssertionError(f"unexpected hyprctl call {args}")
 
@@ -494,3 +508,99 @@ def test_main_pick_uses_the_daemon_when_it_answers(paths, monkeypatch, capsys):
     assert cli.main(["pick", "--move"], hypr=Hypr(FakeHyprctl())) == 0
     assert sent == ["toggle", "show-move"]
     assert "daemon: ok" in capsys.readouterr().out
+
+
+
+# --------------------------------------------------------------------------- #
+# preview support: switch without recording, restore, move a pinned window
+# --------------------------------------------------------------------------- #
+
+from hyprmeta.preview import PreviewSession  # noqa: E402
+
+
+def test_switch_without_record_leaves_mru_and_state_alone(tmp_path):
+    fake = FakeHyprctl()
+    store_file = tmp_path / "s.json"
+    app = make_app(fake, store_file, {"home": 0, "taxes": 10})
+    assert app.switch("taxes", record=False) == [14, 15, 16]
+    assert fake.batches and "focusworkspaceoncurrentmonitor 14" in fake.batches[0]
+    assert app.store.recent == ["home"]
+    assert not store_file.exists()
+
+
+def test_show_workspaces_checks_the_monitor_count(tmp_path):
+    app = make_app(FakeHyprctl(), tmp_path / "s.json")
+    with pytest.raises(HyprmetaError, match="2 target workspaces for 3 monitors"):
+        app.show_workspaces([1, 2])
+
+
+def test_move_window_by_address_uses_that_windows_monitor(tmp_path):
+    fake = FakeHyprctl()
+    fake.active_window_monitor_id = 0  # the FOCUSED window is elsewhere; must not matter
+    app = make_app(fake, tmp_path / "s.json", {"home": 0, "taxes": 10})
+    assert app.move_window("taxes", address="0xw") == 16  # 0xw is on monitor 2 = slot base 6
+    assert fake.batches == [["movetoworkspacesilent 16,address:0xw"]]
+    with pytest.raises(HyprmetaError, match="no window with address 0xnope"):
+        app.move_window("taxes", address="0xnope")
+
+
+def preview_world(tmp_path):
+    fake = FakeHyprctl(simulate=True, focused="DP-2")
+    app = make_app(fake, tmp_path / "s.json", {"home": 0, "taxes": 10, "legal": 30}, recent=["home"])
+    session = PreviewSession(app, app.monitors(), origin_window="0xorigin")
+    return fake, app, session
+
+
+def test_preview_shows_without_recording_and_skips_repeats(tmp_path):
+    fake, app, session = preview_world(tmp_path)
+    assert session.preview("taxes") is True
+    assert list(fake.active.values()) == [14, 15, 16]
+    assert fake.focused == "DP-2"  # focus goes back to the monitor that had it
+    assert session.preview("taxes") is False  # already shown: no second batch
+    assert session.preview(None) is False  # create / new rows
+    assert len(fake.batches) == 1
+    assert app.store.recent == ["home"]
+
+
+def test_commit_records_without_switching_again(tmp_path):
+    fake, app, session = preview_world(tmp_path)
+    session.preview("legal")
+    session.commit("legal")
+    assert len(fake.batches) == 1  # the preview already showed it
+    assert app.store.recent == ["legal", "home"]
+    assert app.store.last_used["legal"] > 0
+    assert session.preview("taxes") is False  # a closed session ignores late selections
+
+
+def test_cancel_restores_the_exact_origin_even_off_grid(tmp_path):
+    fake = FakeHyprctl(active=(14, 5, 16), simulate=True)  # drifted: no meta matches
+    app = make_app(fake, tmp_path / "s.json", {"home": 0, "taxes": 10, "legal": 30})
+    session = PreviewSession(app, app.monitors(), None)
+    session.preview("legal")
+    assert list(fake.active.values()) == [34, 35, 36]
+    session.cancel()
+    assert list(fake.active.values()) == [14, 5, 16]
+    assert app.store.recent == ["home"]
+
+
+def test_cancel_without_a_preview_does_nothing(tmp_path):
+    fake, app, session = preview_world(tmp_path)
+    session.cancel()
+    assert fake.batches == []
+
+
+def test_auto_commit_config(tmp_path):
+    cfg_file = tmp_path / "c.json"
+    Config(base=[4, 5, 6]).save(cfg_file)
+    assert Config.load(cfg_file).auto_commit_s == 1.0
+    data = json.loads(cfg_file.read_text())
+    data["auto_commit_s"] = 0
+    cfg_file.write_text(json.dumps(data))
+    assert Config.load(cfg_file).auto_commit_s == 0.0
+    data["auto_commit_s"] = -1
+    cfg_file.write_text(json.dumps(data))
+    with pytest.raises(HyprmetaError, match="auto_commit_s"):
+        Config.load(cfg_file)
+    del data["auto_commit_s"]  # configs written before the key existed
+    cfg_file.write_text(json.dumps(data))
+    assert Config.load(cfg_file).auto_commit_s == 1.0

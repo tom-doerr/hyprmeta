@@ -56,6 +56,7 @@ from .agents import (  # noqa: E402
     marks_markup,
     write_snapshot,
 )
+from .preview import PreviewSession  # noqa: E402
 from .shortcuts import GlobalShortcuts  # noqa: E402
 
 log = logging.getLogger("hyprmeta")
@@ -174,6 +175,9 @@ class Picker:
         self.tracker: AgentTracker | None = None
         self._tags: dict[str, set[str]] = {}
         self._scan_pending = False
+        self.session: PreviewSession | None = None
+        self.previewing = False  # pick mode shows the selected meta live
+        self._timer_id: int | None = None  # idle auto-commit
         self._build()
         self._setup_tracker()
 
@@ -219,6 +223,7 @@ class Picker:
         # placeholder while it is focused, and the list needs no focus ring.
         self.list.set_can_focus(False)
         self.list.connect("row-activated", lambda lb, row: self._activate())
+        self.list.connect("row-selected", lambda lb, row: self._on_selection())
         scroll.add(self.list)
         outer.pack_start(self.entry, False, False, 0)
         outer.pack_start(scroll, True, True, 0)
@@ -227,7 +232,7 @@ class Picker:
         self.entry.connect("changed", lambda e: self._populate(e.get_text()))
         win.connect("key-press-event", self._on_key)
         win.connect("draw", self._on_draw)
-        win.connect("delete-event", lambda *a: self.hide() or True)
+        win.connect("delete-event", lambda *a: self.cancel() or True)
         outer.show_all()
         win.realize()  # build the surface now, not on the first keypress
 
@@ -295,7 +300,7 @@ class Picker:
         self.win.resize(WIDTH, 1)
 
     # ------------------------------------------------------------- show/hide
-    def show(self, move: bool = False, t_press: int | None = None) -> None:
+    def show(self, move: bool = False, t_press: int | None = None, preview: bool = True) -> None:
         self._t_press = t_press
         self._t_receipt = time.monotonic_ns()
         self._painted = False
@@ -305,7 +310,8 @@ class Picker:
             log.error("cannot open picker: %s", exc)
             return
         mons = self.cache.monitors
-        offset = self.app.current_offset(mons) if len(mons) == len(self.app.cfg.base) else None
+        on_grid = len(mons) == len(self.app.cfg.base)
+        offset = self.app.current_offset(mons) if on_grid else None
         self.current = self.app.store.name_for_offset(offset) if offset is not None else None
         now = time.time()
         summary = self.tracker.meta_summary() if self.tracker is not None else {}
@@ -314,6 +320,13 @@ class Picker:
             for n in self.app.store.ordered()
             if n != self.current
         ]
+        # The window focused right now is the one Alt+Enter moves (the tracker
+        # follows focus events, so this costs no hyprctl call on the show path).
+        origin_window = self.tracker.focused if self.tracker is not None else None
+        self.session = PreviewSession(self.app, mons, origin_window)
+        # Live preview only when choosing where to GO: in move mode an idle
+        # auto-commit would move a window somewhere by accident.
+        self.previewing = preview and not move and on_grid
         self.mode = "pick"
         self.move = move
         self.entry.set_placeholder_text("move window to meta workspace" if move else "meta workspace")
@@ -322,27 +335,107 @@ class Picker:
         self._populate("")
         self.win.show()
         self.win.set_focus(None)  # placeholder stays visible until the first keystroke
+        GLib.idle_add(self._after_show)  # preview after the first paint, not before it
+
+    def _after_show(self) -> bool:
+        self._on_selection()
+        self._arm_timer()
+        return False
 
     def hide(self) -> None:
+        """Unmap only. Closing WITHOUT a choice goes through cancel()."""
+        self._disarm_timer()
         self.win.hide()
         self.mode = "pick"
         # a peek() dropped the keyboard grab; every real show must have it back
         GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.EXCLUSIVE)
 
     def peek(self) -> None:
-        """Show WITHOUT taking the keyboard — for screenshots and tests.
-
-        A normal show grabs the keyboard exclusively, so an automated screenshot
-        swallows whatever the user is typing at that moment (it happened).
-        """
+        """Show WITHOUT taking the keyboard and without previewing — for screenshots
+        and tests. A normal show grabs the keyboard exclusively, so an automated
+        screenshot swallows whatever the user is typing (it happened), and a
+        preview would switch the user's workspaces."""
         GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
-        self.show()
+        self.show(preview=False)
 
     def toggle(self, move: bool = False, t_press: int | None = None) -> None:
         if self.win.get_visible():
-            self.hide()
+            self.cancel()  # pressing the trigger again = close without choosing
         else:
             self.show(move, t_press)
+
+    def cancel(self) -> None:
+        """Close without choosing: every monitor goes back to what it showed.
+
+        Restore FIRST, while the picker still holds the keyboard (Hyprland refuses
+        window focus meanwhile), then close — so the original window is visible
+        again and gets focus back, and no previewed window ever counts as seen.
+        """
+        self._disarm_timer()
+        if self.session is not None:
+            try:
+                self.session.cancel()
+            except HyprmetaError as exc:
+                log.error("cannot restore the workspaces: %s", exc)
+        self.hide()
+
+    def _commit(self, name: str) -> None:
+        """Make `name` the real switch (recorded as opened) and close.
+
+        Close FIRST: the previewed meta is already on screen, so Hyprland then
+        focuses the window under the cursor there; the commit only records.
+        """
+        session = self.session
+        self.hide()
+        try:
+            if session is not None:
+                session.commit(name)
+            elif self.app is not None:
+                self.app.switch(name)
+        except HyprmetaError as exc:
+            log.error("%s", exc)
+
+    # ------------------------------------------------------------ preview
+    def _selected_meta(self) -> str | None:
+        row = self.list.get_selected_row()
+        meta = getattr(row, "meta", None) if row is not None else None
+        return str(meta["name"]) if meta and "name" in meta else None
+
+    def _on_selection(self) -> None:
+        """The selection moved: show that meta on every monitor right away."""
+        if not (self.previewing and self.mode == "pick" and self.session and self.win.get_visible()):
+            return
+        name = self._selected_meta()
+        if name is None:
+            return  # the create / new rows: keep showing the last preview
+        try:
+            self.session.preview(name)
+        except HyprmetaError as exc:
+            log.error("preview of %s failed: %s", name, exc)
+
+    def _arm_timer(self) -> None:
+        """(Re)start the idle timer — called on open and on every key press."""
+        self._disarm_timer()
+        if self.previewing and self.app is not None and self.app.cfg.auto_commit_s > 0:
+            self._timer_id = GLib.timeout_add(int(self.app.cfg.auto_commit_s * 1000), self._on_idle)
+
+    def _disarm_timer(self) -> None:
+        if self._timer_id is not None:
+            GLib.source_remove(self._timer_id)
+            self._timer_id = None
+
+    def _on_idle(self) -> bool:
+        """No input for auto_commit_s: the previewed meta becomes the real switch.
+
+        Only when an existing meta is selected. If the typed text matches none
+        (the `create` row: a new name, or a typo) the picker stays open.
+        """
+        self._timer_id = None  # this source is finishing; never source_remove it
+        if self.win.get_visible() and self.mode == "pick":
+            name = self._selected_meta()
+            if name is not None:
+                self._commit(name)
+        return False
 
     # ------------------------------------------------------------- agents
     def _setup_tracker(self) -> None:
@@ -455,6 +548,7 @@ class Picker:
             log.warning("tagwindow failed: %s", exc)
 
     def _enter_new_mode(self) -> None:
+        self._disarm_timer()  # naming a new meta never auto-closes
         self.mode = "new"
         self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, None)
         self.entry.set_placeholder_text("＋ name for the new meta workspace")
@@ -466,8 +560,10 @@ class Picker:
     def _on_key(self, widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
         key = event.keyval
         state = event.state
+        if self.mode == "pick":
+            self._arm_timer()  # any input restarts the idle auto-commit
         if key == Gdk.KEY_Escape:
-            self.hide()
+            self.cancel()
             return True
         if key in (Gdk.KEY_Down, Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab, Gdk.KEY_Up):
             self._move_selection(-1 if key in (Gdk.KEY_Up, Gdk.KEY_ISO_Left_Tab) else 1)
@@ -512,23 +608,54 @@ class Picker:
         if "create" in meta:
             name = str(meta["create"])
             self._run(lambda: (app.create(validate_name(name), None), self._go(name, move, follow)))
+        elif move:
+            self._move(str(meta["name"]), follow)
         else:
-            name = str(meta["name"])
-            self._run(lambda: self._go(name, move, follow))
+            self._commit(str(meta["name"]))
+
+    def _move(self, name: str, follow: bool) -> None:
+        """Move the window that was focused when the picker opened.
+
+        Without follow you stay where you were: restore the view first (before
+        closing, see cancel), then send the window away. With follow the preview
+        already shows the target, so close and move it there.
+        """
+        self._disarm_timer()
+        session = self.session
+        address = session.origin_window if session is not None else None
+        try:
+            if session is not None and not follow:
+                session.cancel()
+            self.hide()
+            assert self.app is not None
+            self.app.move_window(name, follow=follow, address=address)
+        except HyprmetaError as exc:
+            self.hide()
+            log.error("%s", exc)
 
     def _go(self, name: str, move: bool, follow: bool) -> None:
         assert self.app is not None
         if move:
-            self.app.move_window(name, follow=follow)
+            address = self.session.origin_window if self.session is not None else None
+            self.app.move_window(name, follow=follow, address=address)
         else:
             self.app.switch(name)
 
     def _run(self, fn) -> None:  # noqa: ANN001
-        self.hide()  # respond visually first; the hyprctl work follows
+        """Do the work while the picker still holds the keyboard, THEN close.
+
+        Hyprland refuses window focus while the picker is open, so the switch
+        lands without any window getting focus on the way (a previewed window
+        focused in passing would count as seen); closing then focuses the window
+        under the cursor on the destination.
+        """
+        self._disarm_timer()
         try:
             fn()
         except HyprmetaError as exc:
             log.error("%s", exc)
+        finally:
+            self.hide()
 
     # --------------------------------------------------------------- timing
     def _on_draw(self, widget: Gtk.Widget, cr) -> bool:  # noqa: ANN001
@@ -579,7 +706,7 @@ class CommandServer:
         elif cmd == "peek":
             p.peek()
         elif cmd == "hide":
-            p.hide()
+            p.cancel()  # close without choosing: previews are undone
         elif cmd == "ping":
             return "pong"
         elif cmd == "quit":

@@ -44,7 +44,8 @@ hyprmeta switch -        # back to the previous one
   "base": [4, 5, 6],
   "step": 10,
   "menu": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi.css --prompt \"meta workspace\"",
-  "menu_new": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi-new.css --exec-search -D dynamic_lines=true -D lines=3 --prompt \"＋ name for the new meta workspace\""
+  "menu_new": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi-new.css --exec-search -D dynamic_lines=true -D lines=3 --prompt \"＋ name for the new meta workspace\"",
+  "auto_commit_s": 1.0
 }
 ```
 
@@ -55,7 +56,9 @@ kind of command used to ask for a new meta's name: it receives one hint line
 (`ᴛʏᴘᴇ ᴀ ɴᴀᴍᴇ · ᴇɴᴛᴇʀ ᴄʀᴇᴀᴛᴇs ɪᴛ · ᴇsᴄ ᴄᴀɴᴄᴇʟs`) and must print what was
 **typed**, which is what wofi's `--exec-search` does; the shipped stylesheet
 tints that dialog mint so it never looks like the picker. `{assets}` expands
-to the package's `assets/` directory.
+to the package's `assets/` directory. `auto_commit_s` is how long the resident
+picker waits for input before its live preview becomes the real switch
+(`0` = never close on its own).
 
 ## The resident picker (recommended): 3–6 ms from keypress to pixels
 
@@ -67,7 +70,7 @@ Measured on a 120 Hz setup: **3.4–6.3 ms keypress→draw** (the one-shot wofi
 path was ~90 ms plus a 200 ms fade).
 
 ```ini
-bind = $mainMod, SPACE, global, hyprmeta:pick             # open (again = close)
+bind = $mainMod, SPACE, global, hyprmeta:pick             # open (again = back where you were)
 bind = $mainMod SHIFT, SPACE, global, hyprmeta:pick-move  # move the focused window
 ```
 
@@ -82,19 +85,40 @@ systemctl --user enable --now hyprmeta-daemon.service
 Needs `python3-gi`, `gir1.2-gtklayershell-0.1` and a pipx install that can see
 them: `pipx install --system-site-packages --editable ~/git/hyprmeta`.
 
-Keys inside the picker: type to fuzzy-filter, Up/Down/Tab to move, **Enter**
-switch, **Alt+Enter** move the focused window there, **Shift+Enter** move and
-follow, **Escape** close. With nothing matching, Enter creates a meta named
-after what you typed; the `＋ new meta workspace` row asks for a name. The
-current meta is derived from a monitor snapshot kept fresh through Hyprland's
+**Live preview.** Every monitor shows the SELECTED meta as soon as it is
+selected, with the picker still open, so moving through the list flips your
+whole desk. A preview is not an "open": it does not reorder the list or reset
+"last opened". What makes it one:
+
+- **No input for `auto_commit_s` (default 1 s):** the previewed meta becomes the
+  real switch and the picker closes. Every key press restarts the timer. Since
+  the list leaves out the meta you are on, a lone tap of the trigger returns you
+  to the previous meta, like Alt+Tab.
+- **Enter** or a click: the same, immediately.
+- **Escape**, or the trigger again: every monitor goes back to exactly what it
+  showed before, including an off-grid layout, and nothing is recorded.
+- **Typed text matching no meta** (a new name, or a typo): the picker stays open,
+  showing the last preview, until you press Enter (creates it) or Escape.
+
+Other keys: type to fuzzy-filter, Up/Down/Tab to move, **Alt+Enter** moves the
+window that was focused when the picker opened, **Shift+Enter** moves it and
+follows. The move picker (`hyprmeta:pick-move`) never previews or auto-closes,
+because an idle timeout must not move a window by accident. The `＋ new meta
+workspace` row asks for a name.
+
+Keyboard focus stays in the picker while it previews: Hyprland refuses window
+focus while an exclusive layer surface is open. On close it focuses the window
+under the cursor on the meta you chose, or your original window after Escape.
+The current meta comes from a monitor snapshot kept fresh through Hyprland's
 event socket, so opening the picker issues no compositor query.
 
-It also listens on `$XDG_RUNTIME_DIR/hyprmeta.sock` (`toggle`, `show`,
-`show-move`, `peek`, `hide`, `ping`, `quit`). `peek` shows the picker without
-taking the keyboard, for screenshots and tests: a normal show grabs every
-keystroke, including whatever someone is typing at that moment. `hyprmeta pick`
-uses the socket when the daemon is running and falls back to the menu command
-below otherwise (`--no-daemon` forces the menu).
+It also listens on `$XDG_RUNTIME_DIR/hyprmeta.sock`: `toggle`, `show`,
+`show-move`, `peek`, `hide` (= Escape, undoes a preview), `ping`, `quit`.
+`peek` shows the picker without taking the keyboard and without previewing,
+for screenshots and tests. A normal show grabs every keystroke, including
+whatever someone is typing at that moment. `hyprmeta pick` uses the socket
+when the daemon is running and falls back to the menu command below otherwise
+(`--no-daemon` forces the menu).
 
 ## Agent status: which terminals run Claude Code / Codex, and who needs a look
 
