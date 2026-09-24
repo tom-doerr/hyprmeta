@@ -755,6 +755,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--waybar", action="store_true", help="print a waybar custom-module JSON line")
     s.add_argument("--follow", action="store_true", help="with --waybar: keep printing when the snapshot changes")
     s.add_argument("--row", action="store_true", help="with --waybar: all metas on one line (horizontal bar)")
+    s.add_argument("--wrap", type=int, default=0, metavar="CELLS",
+                   help="with --row: start a new line before a line would pass CELLS characters (0 = never)")
 
     s = sub.add_parser("goto", help="workspace N relative to the current meta (for Super+N binds)")
     s.add_argument("n", type=int)
@@ -789,6 +791,10 @@ def cmd_init(args: argparse.Namespace, hypr: Hypr) -> int:
 def cmd_agents(args: argparse.Namespace) -> int:
     from .agents import agents_file, render_waybar  # lazy: agents imports this module
 
+    if args.wrap < 0:
+        raise HyprmetaError("--wrap must be >= 0 (0 = never wrap)")
+    if args.wrap and not args.row:
+        raise HyprmetaError("--wrap only applies to --row")
     path = agents_file()
 
     def load() -> dict:
@@ -818,7 +824,7 @@ def cmd_agents(args: argparse.Namespace) -> int:
             else:
                 # picker order (most recently opened first), current meta included
                 names = Store.load(state_path()).ordered() or order
-                line = render_waybar(snap, names, row=args.row)
+                line = render_waybar(snap, names, row=args.row, wrap=args.wrap)
             print(json.dumps(line), flush=True)
         if not args.follow:
             return 0

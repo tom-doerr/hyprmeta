@@ -308,3 +308,37 @@ def test_render_waybar_row_is_one_line():
     assert re.sub(r"<[^>]+>", "", out["text"]) == "○1 home  │  ▶1 ○1 taxes  │  empty"
     assert out["class"] == "running"
     assert out["tooltip"] == ag.render_waybar(snap, ["home", "taxes", "empty"])["tooltip"]
+
+
+def test_row_wraps_between_entries_never_inside_one():
+    snap = {
+        "metas": {
+            "taxes": {"running": 1, "idle": 1},
+            "home": {"idle": 1},
+            "empty": {},
+            "a_very_long_meta_name": {},
+        },
+        "current_meta": "home",
+    }
+    order = ["home", "taxes", "empty", "a_very_long_meta_name"]
+
+    def visible(wrap: int) -> list[str]:
+        text = ag.render_waybar(snap, order, row=True, wrap=wrap)["text"]
+        return [re.sub(r"<[^>]+>", "", line) for line in text.split("\n")]
+
+    # "○1 home  │  ▶1 ○1 taxes" is 23 cells; "  │  empty" would make it 33
+    assert visible(32) == ["○1 home  │  ▶1 ○1 taxes", "empty  │  a_very_long_meta_name"]  # 31 cells
+    assert visible(33) == ["○1 home  │  ▶1 ○1 taxes  │  empty", "a_very_long_meta_name"]
+    # an entry wider than the limit still gets its own line, whole
+    assert visible(5)[-1] == "a_very_long_meta_name" and len(visible(5)) == 4
+    # 0 = never wrap; so does a limit the whole row fits in
+    assert len(visible(0)) == len(visible(1000)) == 1
+    for wrap in (22, 31, 40):
+        assert all(len(line) <= wrap for line in visible(wrap) if line != "a_very_long_meta_name")
+
+
+def test_wrap_is_rejected_where_it_would_be_ignored():
+    from hyprmeta import cli
+
+    assert cli.main(["agents", "--waybar", "--wrap", "80"]) == 1  # no --row
+    assert cli.main(["agents", "--waybar", "--row", "--wrap", "-1"]) == 1

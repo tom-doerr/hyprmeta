@@ -162,7 +162,10 @@ renders 3 px wider and shifts its row.
    meta in bold). Its class is
    `attention`, `running` or `idle` for CSS. See `contrib/waybar-meta.jsonc`.
    Add `--row` to put every meta on one line instead, for a regular
-   horizontal bar.
+   horizontal bar, and `--wrap CELLS` to continue on a new line before a line
+   would pass that many characters (bar width ÷ font cell width, minus
+   padding). Waybar grows the bar for the extra line and shrinks it back when
+   the metas fit on one line again.
 3. **Window borders**: the daemon tags terminals `agent-done` / `agent-running`
    (`tagwindow`, diffed every 2 s against the tags Hyprland really has) and
    window rules paint them:

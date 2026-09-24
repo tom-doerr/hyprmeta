@@ -505,20 +505,39 @@ def marks_markup(m: dict) -> str:
 
 
 ROW_SEP = f'  <span foreground="{COLOR_DIM}">│</span>  '
+ROW_SEP_CELLS = 5  # visible width of ROW_SEP
 
 
-def render_waybar(snapshot: dict, order: list[str], row: bool = False) -> dict:
+def pack_row(entries: list[str], widths: list[int], wrap: int) -> str:
+    """Join entries with ROW_SEP, breaking the line before an entry that would
+    push it past `wrap` cells (0 = never). Entries are never split: one wider
+    than `wrap` gets a line to itself."""
+    lines, line, used = [], [], 0
+    for entry, width in zip(entries, widths):
+        if line and wrap and used + ROW_SEP_CELLS + width > wrap:
+            lines.append(ROW_SEP.join(line))
+            line, used = [], 0
+        used += (ROW_SEP_CELLS if line else 0) + width
+        line.append(entry)
+    if line:
+        lines.append(ROW_SEP.join(line))
+    return "\n".join(lines)
+
+
+def render_waybar(snapshot: dict, order: list[str], row: bool = False, wrap: int = 0) -> dict:
     """One line per meta: markers right-aligned in a column, then the name.
 
     Right-aligning puts each row's markers directly against its own name while
     the names still form one column (user request: see what belongs to what).
     row=True puts every meta on ONE line instead, for a horizontal bar: same
-    markers and names, no alignment padding, separated by a dim bar.
+    markers and names, no alignment padding, separated by a dim bar. wrap=N
+    continues on a new line before a line would pass N cells; waybar grows the
+    bar for the extra line and shrinks it back when it is gone.
     """
     metas = snapshot.get("metas", {})
     current = snapshot.get("current_meta")
     col = max((len(marks_text(metas.get(n, {}))) for n in order), default=0)
-    lines, tips = [], []
+    lines, widths, tips = [], [], []
     attention = running = False
     for name in order:
         m = metas.get(name, {})
@@ -529,6 +548,8 @@ def render_waybar(snapshot: dict, order: list[str], row: bool = False) -> dict:
         if row:
             marks = marks_markup(m)
             lines.append(f"{marks} {label}" if marks else label)
+            mt = marks_text(m)
+            widths.append(len(mt) + 1 + len(name) if mt else len(name))
         else:
             pad = " " * (col - len(marks_text(m)))
             lines.append(f"{pad}{marks_markup(m)}{' ' if col else ''}{label}")
@@ -540,4 +561,5 @@ def render_waybar(snapshot: dict, order: list[str], row: bool = False) -> dict:
         )
     tips.append(LEGEND)
     cls = "attention" if attention else ("running" if running else "idle")
-    return {"text": (ROW_SEP if row else "\n").join(lines), "tooltip": "\n".join(tips), "class": cls}
+    text = pack_row(lines, widths, wrap) if row else "\n".join(lines)
+    return {"text": text, "tooltip": "\n".join(tips), "class": cls}
