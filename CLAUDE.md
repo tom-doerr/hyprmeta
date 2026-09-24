@@ -30,6 +30,9 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
 - Attention semantics are USER DECISIONS: a stop must be stable `IDLE_CONFIRM_S`; only
   keyboard focus clears a flag (showing the workspace does not); a window focused while
   its agent finished is never flagged. Do not "simplify" these away.
+- Waybar name colour is a USER DECISION too (`name_color`): the count-weighted sRGB mean
+  of the NON-idle marker colours (2 working + 1 finished = ⅔ green + ⅓ blue); all idle =
+  the idle colour; no agents = the old dim/bright. Bold alone marks the current meta.
 - Tags are reconciled against `hyprctl clients -j` tags every full scan (never trust
   the daemon's memory alone). Hyprland 0.52 needs TWO `border_color` rules per tag —
   see README "Window borders" for the three parser bugs.

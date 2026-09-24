@@ -504,6 +504,18 @@ def marks_markup(m: dict) -> str:
     return " ".join(f'<span foreground="{color}">{_esc(text)}</span>' for text, color in marks_parts(m))
 
 
+def name_color(m: dict) -> str | None:
+    """The meta name's colour: the count-weighted mean (per sRGB channel) of the
+    marker colours of its NON-idle agents — 2 working + 1 finished = ⅔ green +
+    ⅓ blue (user request). All agents idle = the idle colour; no agents = None."""
+    weights = [(m[key], color) for key, _, color in MARKS if key != "idle" and m.get(key)]
+    total = sum(n for n, _ in weights)
+    if not total:
+        return COLOR_IDLE if m.get("idle") else None
+    rgb = (sum(n * int(color[1 + 2 * i : 3 + 2 * i], 16) for n, color in weights) / total for i in range(3))
+    return "#" + "".join(f"{round(c):02x}" for c in rgb)
+
+
 ROW_SEP = f'  <span foreground="{COLOR_DIM}">│</span>  '
 ROW_SEP_CELLS = 5  # visible width of ROW_SEP
 
@@ -541,10 +553,10 @@ def render_waybar(snapshot: dict, order: list[str], row: bool = False, wrap: int
     attention = running = False
     for name in order:
         m = metas.get(name, {})
-        if name == current:
-            label = f'<span foreground="{COLOR_CURRENT}" weight="bold">{_esc(name)}</span>'
-        else:
-            label = f'<span foreground="{COLOR_DIM}">{_esc(name)}</span>'
+        # agent state colours the name; bold alone marks the current meta
+        color = name_color(m) or (COLOR_CURRENT if name == current else COLOR_DIM)
+        bold = ' weight="bold"' if name == current else ""
+        label = f'<span foreground="{color}"{bold}>{_esc(name)}</span>'
         if row:
             marks = marks_markup(m)
             lines.append(f"{marks} {label}" if marks else label)

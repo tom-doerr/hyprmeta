@@ -310,6 +310,37 @@ def test_render_waybar_row_is_one_line():
     assert out["tooltip"] == ag.render_waybar(snap, ["home", "taxes", "empty"])["tooltip"]
 
 
+def test_name_color_is_the_weighted_mean_of_the_non_idle_markers():
+    # 2 working (#a6e3a1) + 1 finished (#89b4fa); idle agents do not count
+    # r (2*166+137)/3=156.3  g (2*227+180)/3=211.3  b (2*161+250)/3=190.7
+    assert ag.name_color({"running": 2, "done": 1, "idle": 5}) == "#9cd3bf"
+    assert ag.name_color({"running": 3, "idle": 1}) == ag.COLOR_RUNNING
+    assert ag.name_color({"done": 1, "waiting": 2}) == ag.COLOR_DONE
+    assert ag.name_color({"idle": 4}) == ag.COLOR_IDLE
+    assert ag.name_color({"running": 0, "idle": 0, "windows": 3}) is None
+    assert ag.name_color({}) is None
+
+
+def test_waybar_names_take_the_agent_colour_and_current_stays_bold():
+    snap = {
+        "metas": {
+            "home": {"idle": 1},
+            "taxes": {"running": 2, "done": 1},
+            "legal": {},
+            "empty": {},
+        },
+        "current_meta": "home",
+    }
+    for row in (False, True):
+        text = ag.render_waybar(snap, ["home", "taxes", "legal"], row=row)["text"]
+        assert f'<span foreground="{ag.COLOR_IDLE}" weight="bold">home</span>' in text
+        assert '<span foreground="#9cd3bf">taxes</span>' in text
+        assert f'<span foreground="{ag.COLOR_DIM}">legal</span>' in text  # no agents: unchanged
+    snap["current_meta"] = "empty"  # a current meta without agents keeps the bright colour
+    text = ag.render_waybar(snap, ["empty"])["text"]
+    assert f'<span foreground="{ag.COLOR_CURRENT}" weight="bold">empty</span>' in text
+
+
 def test_row_wraps_between_entries_never_inside_one():
     snap = {
         "metas": {

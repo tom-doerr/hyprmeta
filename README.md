@@ -159,7 +159,9 @@ renders 3 px wider and shifts its row.
    each name, so they read as belonging to it.
 2. **A waybar sidebar**: `hyprmeta agents --waybar --follow` as a custom module
    prints one line per meta (markers right-aligned before the name, current
-   meta in bold). Its class is
+   meta in bold). The name takes the mean colour of its non-idle markers,
+   weighted by count: two working and one finished give ⅔ green + ⅓ blue.
+   All agents idle gives the idle grey. Its class is
    `attention`, `running` or `idle` for CSS. See `contrib/waybar-meta.jsonc`.
    Add `--row` to put every meta on one line instead, for a regular
    horizontal bar, and `--wrap CELLS` to continue on a new line before a line
