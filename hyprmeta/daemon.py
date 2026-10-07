@@ -57,7 +57,7 @@ from .agents import (  # noqa: E402
     write_snapshot,
 )
 from . import layout  # noqa: E402
-from .preview import PreviewSession  # noqa: E402
+from .preview import PreviewSession, auto_commit_delay  # noqa: E402
 from .shortcuts import GlobalShortcuts  # noqa: E402
 
 log = logging.getLogger("hyprmeta")
@@ -181,6 +181,8 @@ class Picker:
         self.session: PreviewSession | None = None
         self.previewing = False  # pick mode shows the selected meta live
         self._timer_id: int | None = None  # idle auto-commit
+        self._touched = False  # any key since the picker opened
+        self._matches: list[str] = []  # metas the typed text matches, best first
         self._scans = 0
         self._snapshot_due = True
         self._layout_sig: str | None = None
@@ -237,7 +239,7 @@ class Picker:
         outer.pack_start(scroll, True, True, 0)
         win.add(outer)
 
-        self.entry.connect("changed", lambda e: self._populate(e.get_text()))
+        self.entry.connect("changed", lambda e: (self._populate(e.get_text()), self._arm_timer()))
         win.connect("key-press-event", self._on_key)
         win.connect("draw", self._on_draw)
         win.connect("delete-event", lambda *a: self.cancel() or True)
@@ -290,6 +292,7 @@ class Picker:
                 if score is not None:
                     scored.append((-score, i, name, age, summary))
             scored.sort()
+            self._matches = [name for _, _, name, _, _ in scored]
             for _, _, name, age, summary in scored:
                 self.list.add(self._row("entry", f"{name:<{width}}{age}", marks=marks_markup(summary), name=name))
             q = query.strip()
@@ -337,6 +340,7 @@ class Picker:
         self.previewing = preview and not move and on_grid
         self.mode = "pick"
         self.move = move
+        self._touched = False
         self.entry.set_placeholder_text("move window to meta workspace" if move else "meta workspace")
         self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, SEARCH_ICON)
         self.entry.set_text("")
@@ -348,6 +352,14 @@ class Picker:
     def _after_show(self) -> bool:
         self._on_selection()
         self._arm_timer()
+        # Where the cursor is in the meta you are leaving: a committed switch
+        # saves it, and switching back puts the cursor there again. Read after
+        # the first paint and the first preview (a preview leaves the cursor put).
+        if self.app is not None:
+            try:
+                self.app.leave(self.current, self.app.hypr.cursor())
+            except HyprmetaError as exc:
+                log.error("cannot read the cursor position: %s", exc)
         return False
 
     def hide(self) -> None:
@@ -390,18 +402,14 @@ class Picker:
     def _commit(self, name: str) -> None:
         """Make `name` the real switch (recorded as opened) and close.
 
-        Close FIRST: the previewed meta is already on screen, so Hyprland then
-        focuses the window under the cursor there; the commit only records.
+        Commit FIRST, while the picker still holds the keyboard: the commit puts
+        the cursor back where you left `name` (focus is refused meanwhile), so
+        closing then focuses the window under it — the one you were in — and no
+        window under the old cursor spot gets focused (= marked seen) on the way.
         """
-        session = self.session
-        self.hide()
-        try:
-            if session is not None:
-                session.commit(name)
-            elif self.app is not None:
-                self.app.switch(name)
-        except HyprmetaError as exc:
-            log.error("%s", exc)
+        session, app = self.session, self.app
+        assert app is not None
+        self._run(lambda: session.commit(name) if session is not None else app.switch(name))
 
     # ------------------------------------------------------------ preview
     def _selected_meta(self) -> str | None:
@@ -422,10 +430,14 @@ class Picker:
             log.error("preview of %s failed: %s", name, exc)
 
     def _arm_timer(self) -> None:
-        """(Re)start the idle timer — called on open and on every key press."""
+        """(Re)start the auto-commit for the input so far (`auto_commit_delay`) —
+        on open, on every key and on every text change."""
         self._disarm_timer()
-        if self.previewing and self.app is not None and self.app.cfg.auto_commit_s > 0:
-            self._timer_id = GLib.timeout_add(int(self.app.cfg.auto_commit_s * 1000), self._on_idle)
+        if not (self.previewing and self.mode == "pick" and self.app is not None):
+            return
+        delay = auto_commit_delay(self.app.cfg, self._touched, self.entry.get_text(), self._matches)
+        if delay > 0:
+            self._timer_id = GLib.timeout_add(int(delay * 1000), self._on_idle)
 
     def _disarm_timer(self) -> None:
         if self._timer_id is not None:
@@ -591,7 +603,9 @@ class Picker:
         key = event.keyval
         state = event.state
         if self.mode == "pick":
-            self._arm_timer()  # any input restarts the idle auto-commit
+            # Any key ends the open-and-wait toggle; text keys re-arm on `changed`.
+            self._touched = True
+            self._arm_timer()
         if key == Gdk.KEY_Escape:
             self.cancel()
             return True

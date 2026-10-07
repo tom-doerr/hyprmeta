@@ -45,7 +45,8 @@ hyprmeta switch -        # back to the previous one
   "step": 10,
   "menu": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi.css --prompt \"meta workspace\"",
   "menu_new": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi-new.css --exec-search -D dynamic_lines=true -D lines=3 --prompt \"＋ name for the new meta workspace\"",
-  "auto_commit_s": 1.0
+  "auto_commit_s": 1.0,
+  "unique_commit_s": 0.25
 }
 ```
 
@@ -57,8 +58,9 @@ kind of command used to ask for a new meta's name: it receives one hint line
 **typed**, which is what wofi's `--exec-search` does; the shipped stylesheet
 tints that dialog mint so it never looks like the picker. `{assets}` expands
 to the package's `assets/` directory. `auto_commit_s` is how long the resident
-picker waits for input before its live preview becomes the real switch
-(`0` = never close on its own).
+picker, opened and left untouched, waits before its live preview (the meta you
+came from) becomes the real switch. `unique_commit_s` is how long it waits after
+typed text narrows the list to exactly one meta. `0` turns either off.
 
 ## The resident picker (recommended): 3–6 ms from keypress to pixels
 
@@ -90,11 +92,20 @@ selected, with the picker still open, so moving through the list flips your
 whole desk. A preview is not an "open": it does not reorder the list or reset
 "last opened". What makes it one:
 
-- **No input for `auto_commit_s` (default 1 s):** the previewed meta becomes the
-  real switch and the picker closes. Every key press restarts the timer. Since
-  the list leaves out the meta you are on, a lone tap of the trigger returns you
-  to the previous meta, like Alt+Tab.
-- **Enter** or a click: the same, immediately.
+- **A lone tap of the trigger:** after `auto_commit_s` (default 1 s) without a
+  key, the previewed meta becomes the real switch and the picker closes. Since
+  the list leaves out the meta you are on, that is the previous meta, like
+  Alt+Tab.
+- **Typed text matching exactly one meta:** that meta is opened `unique_commit_s`
+  (default 0.25 s) after the last key, so two or three letters are a whole
+  switch. The pause keeps the rest of a name typed in one go in the picker
+  instead of sending it to the window you land in. Typing a NEW name that starts
+  like an existing one therefore opens that one; create through the `＋ new meta
+  workspace` row instead.
+- **Once you press any key, nothing else closes the picker on its own** (an
+  ambiguous query, moving with the arrows, deleting the text): you choose with
+  Enter or a click, or Escape.
+- **Enter** or a click: the selected meta, immediately.
 - **Escape**, or the trigger again: every monitor goes back to exactly what it
   showed before, including an off-grid layout, and nothing is recorded.
 - **Typed text matching no meta** (a new name, or a typo): the picker stays open,
@@ -109,6 +120,10 @@ workspace` row asks for a name.
 Keyboard focus stays in the picker while it previews: Hyprland refuses window
 focus while an exclusive layer surface is open. On close it focuses the window
 under the cursor on the meta you chose, or your original window after Escape.
+**The cursor is remembered per meta:** a switch puts it back where it was when you
+last left that meta, before the picker closes, so with `follow_mouse = 1` you land
+in the window you were working in, even on another monitor. A meta you have never
+left keeps the cursor where it is; so does moving a window along (Shift+Enter).
 The current meta comes from a monitor snapshot kept fresh through Hyprland's
 event socket, so opening the picker issues no compositor query.
 
@@ -360,15 +375,17 @@ For each monitor (left to right) whose active workspace is not already the
 target, hyprmeta emits `focusmonitor <mon>; focusworkspaceoncurrentmonitor
 <ws>`; that dispatcher pulls an existing workspace over from another monitor or
 creates it if needed. The batch ends with `focusmonitor` back to the monitor
-that had focus and `movecursor` to the cursor's previous position, so the
-switch is invisible except for the workspaces changing. Everything goes out in
-one `hyprctl --batch` call.
+that had focus and `movecursor`: to the spot remembered for the destination
+meta (where the cursor was when you last left it; `movecursor` simulates a mouse
+move, so focus follows), or, for a meta never left, to the cursor's previous
+position. Everything goes out in one `hyprctl --batch` call.
 
 The "current" meta is always derived from the live active workspaces, never
 from stored state, so pressing `Super+3` and drifting off the grid is reported
 honestly (`current` fails, `list` shows no marker) instead of being guessed.
 
-State: `~/.local/state/hyprmeta/state.json` (names, offsets, recency).
+State: `~/.local/state/hyprmeta/state.json` (names, offsets, recency, the
+remembered cursor spot per meta).
 Override paths with `HYPRMETA_CONFIG` / `HYPRMETA_STATE`.
 
 ## Development

@@ -10,15 +10,32 @@ refuses every window focus (FocusState.cpp: "Refusing a keyboard focus to a
 window because of an exclusive ls"), so previews never move keyboard focus and
 the agent tracker never sees a previewed window as "looked at". Hence the order
 the daemon must keep: on cancel restore the workspaces BEFORE closing (so the
-original window is visible and gets focus back); on commit close first (Hyprland
-then focuses the window under the cursor on the meta you chose).
+original window is visible and gets focus back); on commit ALSO commit before
+closing: the commit moves the cursor back to where you left that meta, and
+closing then focuses the window under it (follow_mouse). Closing first would
+focus whatever sits under the old cursor spot for a moment, marking it seen.
 """
 
 from __future__ import annotations
 
 from typing import Sequence
 
-from .cli import App, Monitor
+from .cli import App, Config, Monitor
+
+
+def auto_commit_delay(cfg: Config, touched: bool, query: str, matches: Sequence[str]) -> float:
+    """Seconds until the picker commits on its own; 0 = it waits for Enter / Escape.
+
+    Untouched (opened, no key yet): `auto_commit_s`, so open + wait = back to the
+    meta you came from. Typed text matching exactly ONE meta: `unique_commit_s`
+    (the short pause keeps the rest of a name typed in one go in the picker
+    instead of in the window you land in). Anything else never closes on its own.
+    """
+    if not touched:
+        return cfg.auto_commit_s
+    if query.strip() and len(matches) == 1:
+        return cfg.unique_commit_s
+    return 0.0
 
 
 class PreviewSession:

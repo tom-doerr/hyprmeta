@@ -170,9 +170,12 @@ class Config:
     step: int = 10
     menu: str = DEFAULT_MENU
     menu_new: str = DEFAULT_MENU_NEW
-    # Resident picker: with no input for this long, the previewed meta becomes
-    # the real switch and the picker closes. 0 = never auto-close.
+    # Resident picker: opened and left untouched this long, the previewed meta
+    # (the one you came from) becomes the real switch. 0 = never auto-close.
     auto_commit_s: float = 1.0
+    # Typed text that matches exactly one meta switches after this pause, so the
+    # rest of a name typed in one go stays in the picker. 0 = wait for Enter.
+    unique_commit_s: float = 0.25
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -188,15 +191,17 @@ class Config:
         step = int(data.get("step", 10))
         if step <= 0:
             raise HyprmetaError(f"{path}: `step` must be positive")
-        auto_commit_s = float(data.get("auto_commit_s", 1.0))
-        if auto_commit_s < 0:
-            raise HyprmetaError(f"{path}: `auto_commit_s` must be >= 0 (0 disables it)")
+        delays = {}
+        for key, default in (("auto_commit_s", 1.0), ("unique_commit_s", 0.25)):
+            delays[key] = float(data.get(key, default))
+            if delays[key] < 0:
+                raise HyprmetaError(f"{path}: `{key}` must be >= 0 (0 disables it)")
         return cls(
             base=base,
             step=step,
             menu=str(data.get("menu", DEFAULT_MENU)),
             menu_new=str(data.get("menu_new", DEFAULT_MENU_NEW)),
-            auto_commit_s=auto_commit_s,
+            **delays,
         )
 
     def save(self, path: Path) -> None:
@@ -204,7 +209,7 @@ class Config:
         path.write_text(
             json.dumps(
                 {"base": self.base, "step": self.step, "menu": self.menu, "menu_new": self.menu_new,
-                 "auto_commit_s": self.auto_commit_s},
+                 "auto_commit_s": self.auto_commit_s, "unique_commit_s": self.unique_commit_s},
                 indent=2,
             )
             + "\n"
@@ -222,10 +227,14 @@ class Store:
     metas: dict[str, int]
     recent: list[str]
     last_used: dict[str, float] | None = None
+    # Where the cursor was when each meta was last left: a switch puts it back.
+    cursors: dict[str, list[int]] | None = None
 
     def __post_init__(self) -> None:
         if self.last_used is None:
             self.last_used = {}
+        if self.cursors is None:
+            self.cursors = {}
 
     @classmethod
     def load(cls, path: Path) -> "Store":
@@ -237,14 +246,18 @@ class Store:
         last_used = {
             str(k): float(v) for k, v in data.get("last_used", {}).items() if str(k) in metas
         }
-        return cls(metas=metas, recent=recent, last_used=last_used)
+        cursors = {
+            str(k): [int(v[0]), int(v[1])] for k, v in data.get("cursors", {}).items() if str(k) in metas
+        }
+        return cls(metas=metas, recent=recent, last_used=last_used, cursors=cursors)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(
             json.dumps(
-                {"metas": self.metas, "recent": self.recent, "last_used": self.last_used},
+                {"metas": self.metas, "recent": self.recent, "last_used": self.last_used,
+                 "cursors": self.cursors},
                 indent=2,
             )
             + "\n"
@@ -299,14 +312,15 @@ class Store:
         self.metas[name] = offset
 
     def remove(self, name: str) -> None:
-        assert self.last_used is not None
+        assert self.last_used is not None and self.cursors is not None
         self.offset(name)
         del self.metas[name]
         self.recent = [n for n in self.recent if n != name]
         self.last_used.pop(name, None)
+        self.cursors.pop(name, None)
 
     def rename(self, old: str, new: str) -> None:
-        assert self.last_used is not None
+        assert self.last_used is not None and self.cursors is not None
         new = validate_name(new)
         off = self.offset(old)
         if new in self.metas:
@@ -316,6 +330,8 @@ class Store:
         self.recent = [new if n == old else n for n in self.recent]
         if old in self.last_used:
             self.last_used[new] = self.last_used.pop(old)
+        if old in self.cursors:
+            self.cursors[new] = self.cursors.pop(old)
 
 
 def socket_path() -> str:
@@ -470,18 +486,19 @@ class App:
             raise HyprmetaError("no previous meta workspace to switch back to")
         return self.store.recent[1]
 
-    def show_workspaces(self, targets: Sequence[int]) -> None:
+    def show_workspaces(self, targets: Sequence[int], cursor: Sequence[int] | None = None) -> None:
         """Put workspace targets[i] on monitor i (left to right) in ONE hyprctl batch.
 
         Monitors already showing their target are skipped; focus returns to the
         monitor that had it and the cursor to where it was, so only the
-        workspaces change.
+        workspaces change. With `cursor` the cursor goes THERE instead (even when
+        no workspace changes), and follow_mouse focuses the window under it.
         """
         mons = self.monitors()
         if len(targets) != len(mons):
             raise HyprmetaError(f"{len(targets)} target workspaces for {len(mons)} monitors")
         focused = next((m for m in mons if m.focused), mons[0])
-        cx, cy = self.hypr.cursor()
+        cx, cy = cursor if cursor is not None else self.hypr.cursor()
 
         dispatches: list[str] = []
         for mon, ws in zip(mons, targets):
@@ -493,15 +510,32 @@ class App:
             dispatches.append(f"focusworkspaceoncurrentmonitor {ws}")
         if dispatches:
             dispatches.append(f"focusmonitor {focused.name}")
+        if dispatches or cursor is not None:
             dispatches.append(f"movecursor {cx} {cy}")
         self.hypr.batch(dispatches)
 
-    def switch(self, name: str, record: bool = True) -> list[int]:
+    def leave(self, name: str | None, cursor: Sequence[int]) -> None:
+        """Remember `cursor` as the spot to return to in meta `name` (saved by the
+        next recorded switch). None = off-grid: there is no meta to remember."""
+        assert self.store.cursors is not None
+        if name is not None:
+            self.store.cursors[name] = [int(cursor[0]), int(cursor[1])]
+
+    def leave_here(self) -> None:
+        """`leave` the meta shown right now at the cursor's current spot."""
+        self.leave(self.current_name(), self.hypr.cursor())
+
+    def switch(self, name: str, record: bool = True, restore_cursor: bool = True) -> list[int]:
         """Show meta `name` on every monitor. `record=False` = a picker preview:
-        shown, but NOT counted as opened (no MRU / last-opened update)."""
+        shown, but NOT counted as opened (no MRU / last-opened update), and the
+        cursor stays put. A recorded switch puts the cursor back where it was
+        when you last left `name` (see `leave`), so you land in that window;
+        `restore_cursor=False` keeps it where it is (moving a window along)."""
+        assert self.store.cursors is not None
         name = self.resolve(name)
         targets = self.workspaces_for(self.store.offset(name))
-        self.show_workspaces(targets)
+        back = self.store.cursors.get(name) if record and restore_cursor else None
+        self.show_workspaces(targets, back)
         if record:
             self.store.touch(name)
             self.store.save(self.store_file)
@@ -525,8 +559,8 @@ class App:
         ws = self.cfg.base[slot] + offset
         target = f"{ws},address:{address}" if address else f"{ws}"
         self.hypr.batch([f"movetoworkspacesilent {target}"])
-        if follow:
-            self.switch(name)
+        if follow:  # you go WITH the window: the cursor stays on its slot
+            self.switch(name, restore_cursor=False)
         return ws
 
     def goto_slot(self, n: int) -> int:
@@ -972,6 +1006,7 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             name = app.resolve(args.name)
             if args.create and name not in app.store.metas:
                 app.create(name, None)
+            app.leave_here()
             targets = app.switch(name)
             print(f"{name}: {' '.join(str(t) for t in targets)}")
         elif args.cmd == "create":
@@ -984,6 +1019,8 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             app.store.rename(args.old, args.new)
             app.store.save(store_file)
         elif args.cmd == "move":
+            if args.follow:
+                app.leave_here()
             ws = app.move_window(args.name, follow=args.follow)
             print(f"moved to workspace {ws} ({args.name})")
         elif args.cmd == "pick":
@@ -996,6 +1033,8 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             with lock:
                 choice = run_menu(menu, app.menu_lines())
                 name = app.resolve_pick(choice, lambda: run_menu(menu_new, [NEW_HINT]))
+            if not args.move or args.follow:
+                app.leave_here()
             if args.move:
                 ws = app.move_window(name, follow=args.follow)
                 print(f"moved to workspace {ws} ({name})")

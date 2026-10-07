@@ -11,7 +11,25 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   stored recent name — that would hide a drifted layout.
 - `switch` emits ONE `hyprctl --batch`: per monitor `focusmonitor` +
   `focusworkspaceoncurrentmonitor`, then focus + cursor restore. Monitors
-  already on target are skipped so a no-op switch sends nothing.
+  already on target are skipped so a no-op switch sends nothing (unless a
+  remembered cursor spot must still be applied: then just `movecursor`).
+- **Cursor memory per meta (user request, Oct 7 2026):** `Store.cursors[name]` =
+  where the cursor was when you last LEFT `name` (`App.leave` / `leave_here`); a
+  RECORDED switch warps there (`movecursor` = warp + `simulateMouseMovement()`, so
+  `follow_mouse = 1` focuses the window under it; no `focuswindow` needed).
+  Previews and move+follow (`restore_cursor=False`) keep the cursor put. The daemon
+  reads the origin spot in `_after_show` (after paint + first preview, never on the
+  show path: `hyprctl` is a subprocess); every CLI switch path calls `leave_here()`.
+- **Daemon commit order: commit BEFORE hide (`_run`).** The commit warps the cursor
+  while the exclusive layer refuses focus; closing then focuses the window under
+  the restored spot. Hide-first would briefly focus the window under the OLD spot,
+  and a focus clears that window's agent-done flag.
+- **Auto-commit rules = USER DECISIONS (Oct 7 2026), pure in `preview.auto_commit_delay`:**
+  untouched picker → `auto_commit_s` (tap the trigger = back to the previous meta); text
+  matching exactly ONE meta → `unique_commit_s` (0.25 s, so a name typed on in one
+  go stays in the picker, not in the window you land in); anything else (ambiguous,
+  arrows, text deleted) NEVER closes on its own. The user disliked the picker
+  closing mid-typing on the old "1 s after any key" rule.
 - `hyprctl activewindow` reports the monitor ID, `monitors` gives names; the
   ID→name join lives in `Hypr.active_window_monitor`.
 - Menu protocol is dmenu-style (lines on stdin, chosen line on stdout, rc≠0 =

@@ -515,7 +515,7 @@ def test_main_pick_uses_the_daemon_when_it_answers(paths, monkeypatch, capsys):
 # preview support: switch without recording, restore, move a pinned window
 # --------------------------------------------------------------------------- #
 
-from hyprmeta.preview import PreviewSession  # noqa: E402
+from hyprmeta.preview import PreviewSession, auto_commit_delay  # noqa: E402
 
 
 def test_switch_without_record_leaves_mru_and_state_alone(tmp_path):
@@ -604,3 +604,79 @@ def test_auto_commit_config(tmp_path):
     del data["auto_commit_s"]  # configs written before the key existed
     cfg_file.write_text(json.dumps(data))
     assert Config.load(cfg_file).auto_commit_s == 1.0
+
+
+def test_unique_commit_config(tmp_path):
+    cfg_file = tmp_path / "c.json"
+    Config(base=[4, 5, 6]).save(cfg_file)
+    assert Config.load(cfg_file).unique_commit_s == 0.25
+    data = json.loads(cfg_file.read_text())
+    data["unique_commit_s"] = -0.1
+    cfg_file.write_text(json.dumps(data))
+    with pytest.raises(HyprmetaError, match="unique_commit_s"):
+        Config.load(cfg_file)
+
+
+def test_auto_commit_delay_toggle_unique_or_wait():
+    cfg = Config(base=[4, 5, 6], auto_commit_s=1.0, unique_commit_s=0.25)
+    assert auto_commit_delay(cfg, False, "", ["legal", "taxes"]) == 1.0  # open + wait = toggle back
+    assert auto_commit_delay(cfg, True, "ta", ["taxes"]) == 0.25  # one match: go
+    assert auto_commit_delay(cfg, True, "t", ["taxes", "twitter"]) == 0  # ambiguous: stay open
+    assert auto_commit_delay(cfg, True, "zz", []) == 0  # nothing (the create row): stay open
+    assert auto_commit_delay(cfg, True, "", ["legal"]) == 0  # touched, text deleted: stay open
+
+
+def test_cursor_returns_to_where_you_left_each_meta(tmp_path):
+    fake = FakeHyprctl(simulate=True, cursor=(100, 200))
+    app = make_app(fake, tmp_path / "s.json", {"home": 0, "taxes": 10})
+    app.leave_here()  # in home, cursor at (100, 200)
+    app.switch("taxes")
+    assert fake.batches[-1][-1] == "movecursor 100 200"  # never left taxes yet: the cursor stays
+    fake.cursor = (3000, 4000)  # then worked on the right monitor in taxes
+    app.leave_here()
+    app.switch("home")
+    assert fake.batches[-1][-1] == "movecursor 100 200"
+    app.switch("taxes")
+    assert fake.batches[-1][-1] == "movecursor 3000 4000"
+    assert Store.load(tmp_path / "s.json").cursors == {"home": [100, 200], "taxes": [3000, 4000]}
+
+
+def test_commit_after_preview_still_puts_the_cursor_back(tmp_path):
+    fake, app, session = preview_world(tmp_path)
+    app.leave("legal", (7, 8))
+    session.preview("legal")
+    assert fake.batches[-1][-1] == "movecursor 100 200"  # a preview leaves the cursor put
+    session.commit("legal")
+    assert fake.batches[-1] == ["movecursor 7 8"]  # already shown: only the cursor moves
+
+
+def test_follow_move_keeps_the_cursor_with_the_window(tmp_path):
+    fake = FakeHyprctl(simulate=True, cursor=(100, 200))
+    app = make_app(fake, tmp_path / "s.json", {"home": 0, "taxes": 10})
+    app.leave("taxes", (3000, 4000))
+    app.move_window("taxes", follow=True)
+    assert fake.batches[-1][-1] == "movecursor 100 200"
+
+
+def test_store_cursors_follow_rename_and_remove(tmp_path):
+    p = tmp_path / "s.json"
+    store = Store(metas={"home": 0, "taxes": 10}, recent=[], cursors={"home": [1, 2], "taxes": [3, 4]})
+    store.rename("home", "base")
+    store.remove("taxes")
+    store.save(p)
+    assert Store.load(p).cursors == {"base": [1, 2]}
+    p.write_text(json.dumps({"metas": {"home": 0}, "recent": []}))  # state from before cursors
+    assert Store.load(p).cursors == {}
+
+
+def test_main_switch_remembers_the_cursor_of_the_meta_it_leaves(paths):
+    cfg, state = paths
+    fake = FakeHyprctl(simulate=True, cursor=(11, 22))
+    hypr = Hypr(fake)
+    assert cli.main(["init"], hypr=hypr) == 0
+    assert cli.main(["switch", "--create", "taxes"], hypr=hypr) == 0
+    assert json.loads(state.read_text())["cursors"] == {"home": [11, 22]}
+    fake.cursor = (33, 44)
+    assert cli.main(["switch", "home"], hypr=hypr) == 0
+    assert fake.batches[-1][-1] == "movecursor 11 22"
+    assert json.loads(state.read_text())["cursors"] == {"home": [11, 22], "taxes": [33, 44]}
