@@ -117,6 +117,15 @@ follows. The move picker (`hyprmeta:pick-move`) never previews or auto-closes,
 because an idle timeout must not move a window by accident. The `＋ new meta
 workspace` row asks for a name.
 
+**Renaming:** **F2** (or **Ctrl+R**) renames the selected meta, **Shift+F2** (or
+**Ctrl+Shift+R**) the one you are on (the list leaves it out, so it cannot be
+selected). The entry then holds the old name, selected: type to replace it or use
+the arrows to edit it. **Enter** saves and takes you back to the list, the
+renamed meta still selected. **Escape** goes back without saving. A name that is
+taken or invalid is shown in red, and you stay in the editor. Renaming is
+bookkeeping only: windows, workspaces, "last opened" and the remembered cursor
+spot carry over, and the waybar modules show the new name at once.
+
 Keyboard focus stays in the picker while it previews: Hyprland refuses window
 focus while an exclusive layer surface is open. On close it focuses the window
 under the cursor on the meta you chose, or your original window after Escape.
@@ -360,7 +369,7 @@ windowrule {
 | `current` | name of the active meta (exit 1 if monitors disagree or the offset is unnamed) |
 | `switch NAME [--create]` / `switch -` | show a meta on every monitor / go back |
 | `create NAME [--offset N]` | define a meta |
-| `remove NAME`, `rename OLD NEW` | bookkeeping only; windows are never touched |
+| `remove NAME`, `rename OLD NEW` | bookkeeping only; windows are never touched (the picker renames with F2) |
 | `move NAME [--follow]` | move the focused window to the same monitor slot in another meta |
 | `pick [--move] [--follow] [--menu CMD]` | fuzzy picker |
 | `goto N`, `moveto N [--silent]` | slot `N` relative to the current meta |

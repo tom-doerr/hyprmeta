@@ -319,10 +319,14 @@ class Store:
         self.last_used.pop(name, None)
         self.cursors.pop(name, None)
 
-    def rename(self, old: str, new: str) -> None:
+    def rename(self, old: str, new: str) -> str:
+        """Give meta `old` the name `new` (its offset, history and cursor spot move
+        along). Returns the validated name; renaming to the same name is a no-op."""
         assert self.last_used is not None and self.cursors is not None
         new = validate_name(new)
         off = self.offset(old)
+        if new == old:
+            return new
         if new in self.metas:
             raise HyprmetaError(f"meta workspace {new!r} already exists")
         del self.metas[old]
@@ -332,6 +336,7 @@ class Store:
             self.last_used[new] = self.last_used.pop(old)
         if old in self.cursors:
             self.cursors[new] = self.cursors.pop(old)
+        return new
 
 
 def socket_path() -> str:
@@ -587,6 +592,12 @@ class App:
         self.store.save(self.store_file)
         return offset
 
+    def rename(self, old: str, new: str) -> str:
+        """Rename and save; returns the validated new name. Windows are untouched."""
+        name = self.store.rename(old, new)
+        self.store.save(self.store_file)
+        return name
+
     # -- picker ------------------------------------------------------------ #
 
     def age_label(self, name: str, now: float | None = None) -> str:
@@ -755,7 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("remove", help="forget a meta workspace (windows are untouched)")
     s.add_argument("name")
 
-    s = sub.add_parser("rename")
+    s = sub.add_parser("rename", help="rename a meta workspace (windows are untouched)")
     s.add_argument("old")
     s.add_argument("new")
 
@@ -1016,8 +1027,7 @@ def main(argv: Sequence[str] | None = None, hypr: Hypr | None = None) -> int:
             app.store.remove(args.name)
             app.store.save(store_file)
         elif args.cmd == "rename":
-            app.store.rename(args.old, args.new)
-            app.store.save(store_file)
+            app.rename(args.old, args.new)
         elif args.cmd == "move":
             if args.follow:
                 app.leave_here()

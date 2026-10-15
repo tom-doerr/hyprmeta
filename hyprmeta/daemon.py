@@ -73,11 +73,13 @@ MAX_LIST_HEIGHT = 7 * 46
 SEARCH_ICON = "edit-find-symbolic"
 MARKS_GAP = 9  # px between the right-aligned marker column and the name (≈ one space)
 PLUS = "＋"  # sits in the marker column of the create / new rows
+RENAME_HINT = "ʀᴇɴᴀᴍᴇ “{}” · ᴇɴᴛᴇʀ sᴀᴠᴇs · ᴇsᴄ ɢᴏᴇs ʙᴀᴄᴋ"
 
-# Rows that are labels, not choices (the new-name hint).
+# Rows that are labels, not choices (the new-name / rename hint, a rename error).
 EXTRA_CSS = b"""
-#hint { background-color: transparent; border: 1px solid transparent; padding: 4px 14px 0 14px; }
+#hint, #hint-error { background-color: transparent; border: 1px solid transparent; padding: 4px 14px 0 14px; }
 #hint #text { color: rgba(255, 255, 255, 0.55); text-shadow: none; }
+#hint-error #text { color: #ff9e9e; text-shadow: none; }
 """
 
 REFRESH_EVENTS = {
@@ -183,6 +185,9 @@ class Picker:
         self._timer_id: int | None = None  # idle auto-commit
         self._touched = False  # any key since the picker opened
         self._matches: list[str] = []  # metas the typed text matches, best first
+        self._renaming: str | None = None  # rename mode: the meta being renamed
+        self._rename_return: str | None = None  # the meta selected when rename mode began
+        self._rename_error: str | None = None  # shown in place of the hint until the next edit
         self._scans = 0
         self._snapshot_due = True
         self._layout_sig: str | None = None
@@ -239,7 +244,7 @@ class Picker:
         outer.pack_start(scroll, True, True, 0)
         win.add(outer)
 
-        self.entry.connect("changed", lambda e: (self._populate(e.get_text()), self._arm_timer()))
+        self.entry.connect("changed", self._on_changed)
         win.connect("key-press-event", self._on_key)
         win.connect("draw", self._on_draw)
         win.connect("delete-event", lambda *a: self.cancel() or True)
@@ -273,17 +278,23 @@ class Picker:
             box.pack_start(label, True, True, 0)
             row.add(box)
         row.meta = meta  # type: ignore[attr-defined]
-        if css_name == "hint":
+        if css_name in ("hint", "hint-error"):
             row.set_selectable(False)
             row.set_activatable(False)
         return row
 
-    def _populate(self, query: str) -> None:
+    def _populate(self, query: str, select: str | None = None) -> None:
+        """Rebuild the list for `query`; select meta `select` if listed, else the first row."""
         for child in self.list.get_children():
             self.list.remove(child)
         self._marks_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
         if self.mode == "new":
             self.list.add(self._row("hint", NEW_HINT))
+        elif self.mode == "rename":
+            if self._rename_error is not None:
+                self.list.add(self._row("hint-error", self._rename_error))
+            else:
+                self.list.add(self._row("hint", RENAME_HINT.format(self._renaming)))
         else:
             width = max((len(n) for n, _, _ in self.rows), default=0) + 3
             scored = []
@@ -300,7 +311,10 @@ class Picker:
                 self.list.add(self._row("entry", f"create “{q}”", marks=PLUS, create=q))
             self.list.add(self._row("entry", "new meta workspace", marks=PLUS, new=True))
         self.list.show_all()
-        first = self.list.get_row_at_index(0)
+        first = next(
+            (r for r in self.list.get_children() if select is not None and r.meta.get("name") == select),
+            self.list.get_row_at_index(0),
+        )
         if first is not None and first.get_selectable():
             self.list.select_row(first)
         # Layer-shell windows are sized from their MINIMUM height, so make the
@@ -341,9 +355,7 @@ class Picker:
         self.mode = "pick"
         self.move = move
         self._touched = False
-        self.entry.set_placeholder_text("move window to meta workspace" if move else "meta workspace")
-        self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, SEARCH_ICON)
-        self.entry.set_text("")
+        self._reset_entry()
         self._populate("")
         self.win.show()
         self.win.set_focus(None)  # placeholder stays visible until the first keystroke
@@ -362,11 +374,18 @@ class Picker:
                 log.error("cannot read the cursor position: %s", exc)
         return False
 
+    def _reset_entry(self) -> None:
+        """The empty search field of the list (pick mode)."""
+        self.entry.set_placeholder_text("move window to meta workspace" if self.move else "meta workspace")
+        self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, SEARCH_ICON)
+        self.entry.set_text("")
+
     def hide(self) -> None:
         """Unmap only. Closing WITHOUT a choice goes through cancel()."""
         self._disarm_timer()
         self.win.hide()
         self.mode = "pick"
+        self._renaming = None
         # a peek() dropped the keyboard grab; every real show must have it back
         GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.EXCLUSIVE)
 
@@ -481,9 +500,11 @@ class Picker:
         log.info("agent tracking on: %d windows, %s", len(self.tracker.windows), agents_file())
 
     def _on_monitors(self, monitors) -> None:  # noqa: ANN001
-        """Keep meta names and the current meta (display only) in sync."""
+        """Keep meta names and the current meta (display only) in sync; publish when
+        either changed (a rename or create shows up in waybar at once)."""
         if self.tracker is None:
             return
+        before = self.tracker.visible_state()
         store = Store.load(state_path())
         self.tracker.set_metas(store.metas)
         try:
@@ -495,6 +516,7 @@ class Picker:
         name = store.name_for_offset(offset) if offset is not None else None
         if name != self.tracker.current_meta:
             self.tracker.set_current_meta(name)
+        if self.tracker.visible_state() != before:
             self._publish(write=True)
 
     def _on_hypr_events(self, events) -> None:  # noqa: ANN001
@@ -598,14 +620,93 @@ class Picker:
         self._populate("")
         self.win.set_focus(None)
 
+    # --------------------------------------------------------------- rename
+    def _enter_rename_mode(self, name: str) -> None:
+        """Edit meta `name`'s name in the entry: typing replaces it, arrows edit it."""
+        self._disarm_timer()  # renaming never auto-closes
+        if self.previewing and self.session is not None:
+            try:
+                self.session.preview(name)  # show the desk being named (the selected one already is)
+            except HyprmetaError as exc:
+                log.error("preview of %s failed: %s", name, exc)
+        self._rename_return = self._selected_meta()
+        self._renaming = name
+        self._rename_error = None
+        self.mode = "rename"
+        self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, None)
+        self.entry.set_placeholder_text("new name")
+        self.entry.set_text(name)
+        self._populate(name)  # set_text emits nothing when the text already was `name`
+        self.entry.grab_focus_without_selecting()
+        self.entry.select_region(0, -1)
+
+    def _rename(self) -> None:
+        """Enter in rename mode: save the new name, or show why it was refused."""
+        assert self.app is not None and self._renaming is not None
+        old = self._renaming
+        try:
+            new = self.app.rename(old, self.entry.get_text())
+        except HyprmetaError as exc:
+            self._rename_error = str(exc)  # stays in rename mode; the next edit clears it
+            self._populate(self.entry.get_text())
+            return
+        if new != old:
+            log.info("renamed meta %r to %r", old, new)
+            self.rows = [(new if n == old else n, age, summary) for n, age, summary in self.rows]
+            if self.current == old:
+                self.current = new
+            if self.session is not None:
+                self.session.renamed(old, new)
+            if self._rename_return == old:
+                self._rename_return = new
+            self._on_monitors(self.cache.monitors)  # agent tracking + waybar: the new name now
+        self._leave_rename()
+
+    def _leave_rename(self) -> None:
+        """Back to the list, with the meta selected that was selected before."""
+        # Clear the text while still in rename mode: that repopulates only the
+        # hint, so no list row gets selected (= previewed) on the way back.
+        self._reset_entry()
+        self.mode = "pick"
+        self._renaming = None
+        self._rename_error = None
+        self._populate("", select=self._rename_return)
+        self.win.set_focus(None)
+
     # ---------------------------------------------------------------- input
+    def _on_changed(self, entry: Gtk.Entry) -> None:
+        self._rename_error = None
+        self._populate(entry.get_text())
+        self._arm_timer()
+
     def _on_key(self, widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
         key = event.keyval
         state = event.state
+        if self.mode == "rename":
+            if key == Gdk.KEY_Escape:
+                self._leave_rename()
+            elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                self._rename()
+            elif key not in (Gdk.KEY_Down, Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab, Gdk.KEY_Up):
+                return False  # editing keys go to the entry; Tab must not move focus out of it
+            return True
         if self.mode == "pick":
             # Any key ends the open-and-wait toggle; text keys re-arm on `changed`.
             self._touched = True
             self._arm_timer()
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if key == Gdk.KEY_F2 or (ctrl and key in (Gdk.KEY_r, Gdk.KEY_R)):
+                # F2 / Ctrl+R renames the selected meta; with Shift the one you are
+                # on (the list leaves it out, so it cannot be selected).
+                current = bool(state & Gdk.ModifierType.SHIFT_MASK)
+                name = self.current if current else self._selected_meta()
+                if name is not None:
+                    self._enter_rename_mode(name)
+                elif current:
+                    log.info("rename: no current meta (monitors off-grid or the offset is unnamed)")
+                else:
+                    log.info("rename: no meta selected")
+                return True
         if key == Gdk.KEY_Escape:
             self.cancel()
             return True

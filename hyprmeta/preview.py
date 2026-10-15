@@ -54,6 +54,12 @@ class PreviewSession:
         self.shown = name
         return True
 
+    def renamed(self, old: str, new: str) -> None:
+        """Meta `old` is now called `new`: nothing on screen changes, and selecting
+        it again must not count as a new preview (it would switch a second time)."""
+        if self.shown == old:
+            self.shown = new
+
     def commit(self, name: str) -> list[int]:
         """Make `name` a real switch: shown (a no-op if already previewed) AND recorded."""
         self.closed = True

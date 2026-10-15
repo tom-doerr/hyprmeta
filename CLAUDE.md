@@ -30,6 +30,15 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   go stays in the picker, not in the window you land in); anything else (ambiguous,
   arrows, text deleted) NEVER closes on its own. The user disliked the picker
   closing mid-typing on the old "1 s after any key" rule.
+- **Picker rename mode (user request, Oct 15 2026):** F2/Ctrl+R = selected meta,
+  +Shift = the current one (not in the list). `_leave_rename` clears the entry
+  while STILL in rename mode, so the `changed` repopulate shows only the hint; then
+  one `_populate(select=…)` re-selects the old row. The other order selects (=
+  previews = switches) the first row on the way back. After a rename, update
+  `rows`, `current`, `PreviewSession.renamed` (else re-selecting it switches
+  again) and call `_on_monitors`, which publishes whenever `visible_state()`
+  changed (meta names included), so waybar shows the new name at once. A refused
+  name stays in rename mode with a `hint-error` row; never close on an error.
 - `hyprctl activewindow` reports the monitor ID, `monitors` gives names; the
   ID→name join lives in `Hypr.active_window_monitor`.
 - Menu protocol is dmenu-style (lines on stdin, chosen line on stdout, rc≠0 =

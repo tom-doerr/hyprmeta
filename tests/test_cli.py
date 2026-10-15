@@ -583,6 +583,47 @@ def test_cancel_restores_the_exact_origin_even_off_grid(tmp_path):
     assert app.store.recent == ["home"]
 
 
+def test_app_rename_saves_and_carries_history_and_cursor(tmp_path):
+    store_file = tmp_path / "s.json"
+    app = make_app(FakeHyprctl(), store_file, {"home": 0, "taxes": 10}, recent=["taxes", "home"])
+    app.store.touch("taxes", now=50.0)
+    app.leave("taxes", (100, 200))
+    assert app.rename("taxes", "  bills ") == "bills"
+    saved = Store.load(store_file)
+    assert saved.metas == {"home": 0, "bills": 10}
+    assert saved.recent == ["bills", "home"]
+    assert saved.last_used == {"bills": 50.0}
+    assert saved.cursors == {"bills": [100, 200]}
+    assert app.rename("bills", "bills") == "bills"  # unchanged name: a no-op, not "already exists"
+    with pytest.raises(HyprmetaError, match="already exists"):
+        app.rename("bills", "home")
+    with pytest.raises(HyprmetaError, match="must not be empty"):
+        app.rename("bills", "   ")
+    with pytest.raises(HyprmetaError, match="unknown meta workspace 'gone'"):
+        app.rename("gone", "x")
+    assert Store.load(store_file).metas == {"home": 0, "bills": 10}
+
+
+def test_cli_rename(paths):
+    cfg, state = paths
+    Config(base=[4, 5, 6]).save(cfg)
+    Store(metas={"home": 0, "taxes": 10}, recent=["home"]).save(state)
+    assert cli.main(["rename", "taxes", "bills"], hypr=Hypr(FakeHyprctl())) == 0
+    assert Store.load(state).metas == {"home": 0, "bills": 10}
+    assert cli.main(["rename", "bills", "home"], hypr=Hypr(FakeHyprctl())) == 1
+
+
+def test_renaming_the_previewed_meta_does_not_switch_again(tmp_path):
+    fake, app, session = preview_world(tmp_path)
+    session.preview("taxes")
+    app.rename("taxes", "bills")
+    session.renamed("taxes", "bills")
+    assert session.preview("bills") is False  # already on screen under its new name
+    session.renamed("legal", "law")  # not the one shown: nothing to update
+    assert session.shown == "bills"
+    assert len(fake.batches) == 1
+
+
 def test_cancel_without_a_preview_does_nothing(tmp_path):
     fake, app, session = preview_world(tmp_path)
     session.cancel()
