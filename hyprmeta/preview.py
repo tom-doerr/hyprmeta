@@ -23,16 +23,14 @@ from typing import Sequence
 from .cli import App, Config, Monitor
 
 
-def auto_commit_delay(cfg: Config, touched: bool, query: str, matches: Sequence[str]) -> float:
+def auto_commit_delay(cfg: Config, query: str, matches: Sequence[str]) -> float:
     """Seconds until the picker commits on its own; 0 = it waits for Enter / Escape.
 
-    Untouched (opened, no key yet): `auto_commit_s`, so open + wait = back to the
-    meta you came from. Typed text matching exactly ONE meta: `unique_commit_s`
-    (the short pause keeps the rest of a name typed in one go in the picker
-    instead of in the window you land in). Anything else never closes on its own.
+    Typed text matching exactly ONE meta: `unique_commit_s` (the short pause keeps
+    the rest of a name typed in one go in the picker instead of in the window you
+    land in). Anything else never closes on its own, including the untouched
+    picker: it opens with nothing selected, so open + wait changes nothing.
     """
-    if not touched:
-        return cfg.auto_commit_s
     if query.strip() and len(matches) == 1:
         return cfg.unique_commit_s
     return 0.0

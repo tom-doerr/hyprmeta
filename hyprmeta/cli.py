@@ -170,9 +170,6 @@ class Config:
     step: int = 10
     menu: str = DEFAULT_MENU
     menu_new: str = DEFAULT_MENU_NEW
-    # Resident picker: opened and left untouched this long, the previewed meta
-    # (the one you came from) becomes the real switch. 0 = never auto-close.
-    auto_commit_s: float = 1.0
     # Typed text that matches exactly one meta switches after this pause, so the
     # rest of a name typed in one go stays in the picker. 0 = wait for Enter.
     unique_commit_s: float = 0.25
@@ -191,17 +188,15 @@ class Config:
         step = int(data.get("step", 10))
         if step <= 0:
             raise HyprmetaError(f"{path}: `step` must be positive")
-        delays = {}
-        for key, default in (("auto_commit_s", 1.0), ("unique_commit_s", 0.25)):
-            delays[key] = float(data.get(key, default))
-            if delays[key] < 0:
-                raise HyprmetaError(f"{path}: `{key}` must be >= 0 (0 disables it)")
+        unique_commit_s = float(data.get("unique_commit_s", 0.25))
+        if unique_commit_s < 0:
+            raise HyprmetaError(f"{path}: `unique_commit_s` must be >= 0 (0 disables it)")
         return cls(
             base=base,
             step=step,
             menu=str(data.get("menu", DEFAULT_MENU)),
             menu_new=str(data.get("menu_new", DEFAULT_MENU_NEW)),
-            **delays,
+            unique_commit_s=unique_commit_s,
         )
 
     def save(self, path: Path) -> None:
@@ -209,7 +204,7 @@ class Config:
         path.write_text(
             json.dumps(
                 {"base": self.base, "step": self.step, "menu": self.menu, "menu_new": self.menu_new,
-                 "auto_commit_s": self.auto_commit_s, "unique_commit_s": self.unique_commit_s},
+                 "unique_commit_s": self.unique_commit_s},
                 indent=2,
             )
             + "\n"

@@ -45,7 +45,6 @@ hyprmeta switch -        # back to the previous one
   "step": 10,
   "menu": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi.css --prompt \"meta workspace\"",
   "menu_new": "wofi --dmenu --conf {assets}/wofi.conf --style {assets}/wofi-new.css --exec-search -D dynamic_lines=true -D lines=3 --prompt \"＋ name for the new meta workspace\"",
-  "auto_commit_s": 1.0,
   "unique_commit_s": 0.25
 }
 ```
@@ -57,10 +56,9 @@ kind of command used to ask for a new meta's name: it receives one hint line
 (`ᴛʏᴘᴇ ᴀ ɴᴀᴍᴇ · ᴇɴᴛᴇʀ ᴄʀᴇᴀᴛᴇs ɪᴛ · ᴇsᴄ ᴄᴀɴᴄᴇʟs`) and must print what was
 **typed**, which is what wofi's `--exec-search` does; the shipped stylesheet
 tints that dialog mint so it never looks like the picker. `{assets}` expands
-to the package's `assets/` directory. `auto_commit_s` is how long the resident
-picker, opened and left untouched, waits before its live preview (the meta you
-came from) becomes the real switch. `unique_commit_s` is how long it waits after
-typed text narrows the list to exactly one meta. `0` turns either off.
+to the package's `assets/` directory. `unique_commit_s` is how long the
+resident picker waits after typed text narrows the list to exactly one meta
+before it switches there; `0` turns that off.
 
 ## The resident picker (recommended): 3–6 ms from keypress to pixels
 
@@ -90,21 +88,19 @@ them: `pipx install --system-site-packages --editable ~/git/hyprmeta`.
 **Live preview.** Every monitor shows the SELECTED meta as soon as it is
 selected, with the picker still open, so moving through the list flips your
 whole desk. A preview is not an "open": it does not reorder the list or reset
-"last opened". What makes it one:
+"last opened". The picker opens with NOTHING selected, so your desk stays as it
+is until you type or press an arrow (Down = the top row, the meta you were on
+before; Up = the bottom one). What makes a preview an open:
 
-- **A lone tap of the trigger:** after `auto_commit_s` (default 1 s) without a
-  key, the previewed meta becomes the real switch and the picker closes. Since
-  the list leaves out the meta you are on, that is the previous meta, like
-  Alt+Tab.
 - **Typed text matching exactly one meta:** that meta is opened `unique_commit_s`
   (default 0.25 s) after the last key, so two or three letters are a whole
   switch. The pause keeps the rest of a name typed in one go in the picker
   instead of sending it to the window you land in. Typing a NEW name that starts
   like an existing one therefore opens that one; create through the `＋ new meta
   workspace` row instead.
-- **Once you press any key, nothing else closes the picker on its own** (an
-  ambiguous query, moving with the arrows, deleting the text): you choose with
-  Enter or a click, or Escape.
+- **Nothing else closes the picker on its own** (just opening it, an ambiguous
+  query, moving with the arrows, deleting the text): you choose with Enter or a
+  click, or Escape.
 - **Enter** or a click: the selected meta, immediately.
 - **Escape**, or the trigger again: every monitor goes back to exactly what it
   showed before, including an off-grid layout, and nothing is recorded.

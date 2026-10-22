@@ -183,7 +183,6 @@ class Picker:
         self.session: PreviewSession | None = None
         self.previewing = False  # pick mode shows the selected meta live
         self._timer_id: int | None = None  # idle auto-commit
-        self._touched = False  # any key since the picker opened
         self._matches: list[str] = []  # metas the typed text matches, best first
         self._renaming: str | None = None  # rename mode: the meta being renamed
         self._rename_return: str | None = None  # the meta selected when rename mode began
@@ -284,7 +283,11 @@ class Picker:
         return row
 
     def _populate(self, query: str, select: str | None = None) -> None:
-        """Rebuild the list for `query`; select meta `select` if listed, else the first row."""
+        """Rebuild the list for `query`; select meta `select` if listed, else the best match.
+
+        An empty query selects nothing (user decision, Oct 22 2026): the picker
+        opens on no meta, so nothing is previewed until you type or press an arrow.
+        """
         for child in self.list.get_children():
             self.list.remove(child)
         self._marks_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
@@ -311,12 +314,14 @@ class Picker:
                 self.list.add(self._row("entry", f"create “{q}”", marks=PLUS, create=q))
             self.list.add(self._row("entry", "new meta workspace", marks=PLUS, new=True))
         self.list.show_all()
-        first = next(
+        target = next(
             (r for r in self.list.get_children() if select is not None and r.meta.get("name") == select),
-            self.list.get_row_at_index(0),
+            None,
         )
-        if first is not None and first.get_selectable():
-            self.list.select_row(first)
+        if target is None and query.strip():
+            target = self.list.get_row_at_index(0)
+        if target is not None and target.get_selectable():
+            self.list.select_row(target)
         # Layer-shell windows are sized from their MINIMUM height, so make the
         # list's natural height (capped) the minimum, then let the window shrink
         # or grow to it.
@@ -354,7 +359,6 @@ class Picker:
         self.previewing = preview and not move and on_grid
         self.mode = "pick"
         self.move = move
-        self._touched = False
         self._reset_entry()
         self._populate("")
         self.win.show()
@@ -362,11 +366,9 @@ class Picker:
         GLib.idle_add(self._after_show)  # preview after the first paint, not before it
 
     def _after_show(self) -> bool:
-        self._on_selection()
-        self._arm_timer()
         # Where the cursor is in the meta you are leaving: a committed switch
         # saves it, and switching back puts the cursor there again. Read after
-        # the first paint and the first preview (a preview leaves the cursor put).
+        # the first paint (a preview leaves the cursor put, so typing first is fine).
         if self.app is not None:
             try:
                 self.app.leave(self.current, self.app.hypr.cursor())
@@ -450,11 +452,11 @@ class Picker:
 
     def _arm_timer(self) -> None:
         """(Re)start the auto-commit for the input so far (`auto_commit_delay`) —
-        on open, on every key and on every text change."""
+        on every key and on every text change."""
         self._disarm_timer()
         if not (self.previewing and self.mode == "pick" and self.app is not None):
             return
-        delay = auto_commit_delay(self.app.cfg, self._touched, self.entry.get_text(), self._matches)
+        delay = auto_commit_delay(self.app.cfg, self.entry.get_text(), self._matches)
         if delay > 0:
             self._timer_id = GLib.timeout_add(int(delay * 1000), self._on_idle)
 
@@ -464,7 +466,7 @@ class Picker:
             self._timer_id = None
 
     def _on_idle(self) -> bool:
-        """No input for auto_commit_s: the previewed meta becomes the real switch.
+        """No input for unique_commit_s: the previewed meta becomes the real switch.
 
         Only when an existing meta is selected. If the typed text matches none
         (the `create` row: a new name, or a typo) the picker stays open.
@@ -691,8 +693,8 @@ class Picker:
                 return False  # editing keys go to the entry; Tab must not move focus out of it
             return True
         if self.mode == "pick":
-            # Any key ends the open-and-wait toggle; text keys re-arm on `changed`.
-            self._touched = True
+            # Any key restarts the pause before a unique match opens; text keys
+            # re-arm again on `changed`.
             self._arm_timer()
             ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
             if key == Gdk.KEY_F2 or (ctrl and key in (Gdk.KEY_r, Gdk.KEY_R)):
@@ -730,7 +732,8 @@ class Picker:
         if not rows:
             return
         current = self.list.get_selected_row()
-        i = rows.index(current) if current in rows else -1
+        # Nothing selected (the picker opens that way): Down = first row, Up = last.
+        i = rows.index(current) if current in rows else (-1 if delta > 0 else 0)
         self.list.select_row(rows[(i + delta) % len(rows)])
 
     def _activate(self, move: bool = False, follow: bool = False) -> None:

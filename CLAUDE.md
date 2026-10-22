@@ -25,11 +25,16 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   the restored spot. Hide-first would briefly focus the window under the OLD spot,
   and a focus clears that window's agent-done flag.
 - **Auto-commit rules = USER DECISIONS (Oct 7 2026), pure in `preview.auto_commit_delay`:**
-  untouched picker → `auto_commit_s` (tap the trigger = back to the previous meta); text
-  matching exactly ONE meta → `unique_commit_s` (0.25 s, so a name typed on in one
-  go stays in the picker, not in the window you land in); anything else (ambiguous,
-  arrows, text deleted) NEVER closes on its own. The user disliked the picker
-  closing mid-typing on the old "1 s after any key" rule.
+  text matching exactly ONE meta → `unique_commit_s` (0.25 s, so a name typed on in one
+  go stays in the picker, not in the window you land in); anything else (untouched,
+  ambiguous, arrows, text deleted) NEVER closes on its own. The user disliked the
+  picker closing mid-typing on the old "1 s after any key" rule.
+- **The picker opens with NOTHING selected (user decision, Oct 22 2026):** an empty
+  query selects no row in `_populate` (only an explicit `select=`, e.g. the rename
+  return, does), so opening previews nothing. This retired the Oct 7 "tap the trigger
+  = back to the previous meta" rule and its `auto_commit_s` knob (old configs that
+  still carry the key load fine; it is ignored). `_move_selection` from no selection:
+  Down = first row, Up = last. Enter with nothing selected does nothing.
 - **Picker rename mode (user request, Oct 15 2026):** F2/Ctrl+R = selected meta,
   +Shift = the current one (not in the list). `_leave_rename` clears the entry
   while STILL in rename mode, so the `changed` repopulate shows only the hint; then

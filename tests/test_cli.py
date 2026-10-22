@@ -630,23 +630,6 @@ def test_cancel_without_a_preview_does_nothing(tmp_path):
     assert fake.batches == []
 
 
-def test_auto_commit_config(tmp_path):
-    cfg_file = tmp_path / "c.json"
-    Config(base=[4, 5, 6]).save(cfg_file)
-    assert Config.load(cfg_file).auto_commit_s == 1.0
-    data = json.loads(cfg_file.read_text())
-    data["auto_commit_s"] = 0
-    cfg_file.write_text(json.dumps(data))
-    assert Config.load(cfg_file).auto_commit_s == 0.0
-    data["auto_commit_s"] = -1
-    cfg_file.write_text(json.dumps(data))
-    with pytest.raises(HyprmetaError, match="auto_commit_s"):
-        Config.load(cfg_file)
-    del data["auto_commit_s"]  # configs written before the key existed
-    cfg_file.write_text(json.dumps(data))
-    assert Config.load(cfg_file).auto_commit_s == 1.0
-
-
 def test_unique_commit_config(tmp_path):
     cfg_file = tmp_path / "c.json"
     Config(base=[4, 5, 6]).save(cfg_file)
@@ -658,13 +641,13 @@ def test_unique_commit_config(tmp_path):
         Config.load(cfg_file)
 
 
-def test_auto_commit_delay_toggle_unique_or_wait():
-    cfg = Config(base=[4, 5, 6], auto_commit_s=1.0, unique_commit_s=0.25)
-    assert auto_commit_delay(cfg, False, "", ["legal", "taxes"]) == 1.0  # open + wait = toggle back
-    assert auto_commit_delay(cfg, True, "ta", ["taxes"]) == 0.25  # one match: go
-    assert auto_commit_delay(cfg, True, "t", ["taxes", "twitter"]) == 0  # ambiguous: stay open
-    assert auto_commit_delay(cfg, True, "zz", []) == 0  # nothing (the create row): stay open
-    assert auto_commit_delay(cfg, True, "", ["legal"]) == 0  # touched, text deleted: stay open
+def test_auto_commit_delay_unique_or_wait():
+    cfg = Config(base=[4, 5, 6], unique_commit_s=0.25)
+    assert auto_commit_delay(cfg, "", ["legal", "taxes"]) == 0  # opened, nothing typed: stay open
+    assert auto_commit_delay(cfg, "", ["legal"]) == 0  # even with a single meta in the list
+    assert auto_commit_delay(cfg, "ta", ["taxes"]) == 0.25  # one match: go
+    assert auto_commit_delay(cfg, "t", ["taxes", "twitter"]) == 0  # ambiguous: stay open
+    assert auto_commit_delay(cfg, "zz", []) == 0  # nothing (the create row): stay open
 
 
 def test_cursor_returns_to_where_you_left_each_meta(tmp_path):
