@@ -23,6 +23,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 import time
 
 import gi
@@ -118,15 +119,16 @@ class MonitorCache:
         self.hypr = hypr
         self.monitors: list[Monitor] = []
         self._pending = False
-        self._buf = b""  # a recv() can end mid-line (or mid UTF-8 sequence)
         self.on_refresh = None  # callable(monitors) after each refresh
         self.on_events = None  # callable(list[(event, data)]) for every batch of events
+        self.lost: str | None = None  # why the event socket went away; run() then exits 1
+        self._lock = threading.Lock()
+        self._queued: list[tuple[str, str]] = []  # read by the thread, not yet delivered
         self.refresh()
         path = hypr_event_socket()
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.connect(path)
-        self._sock.setblocking(False)
-        GLib.io_add_watch(self._sock.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self._on_event)
+        threading.Thread(target=self._read_events, name="hypr-events", daemon=True).start()
 
     def refresh(self) -> bool:
         self._pending = False
@@ -138,31 +140,54 @@ class MonitorCache:
             self.on_refresh(self.monitors)
         return False  # one-shot when used as a GLib timeout
 
-    def _on_event(self, fd: int, cond: GLib.IOCondition) -> bool:
-        if cond & GLib.IO_HUP:
-            log.error("Hyprland event socket closed; exiting so systemd restarts us")
-            Gtk.main_quit()
-            return False
-        try:
-            data = self._sock.recv(65536)
-        except BlockingIOError:
-            return True
-        if not data:
-            log.error("Hyprland event socket EOF; exiting so systemd restarts us")
-            Gtk.main_quit()
-            return False
-        *lines, self._buf = (self._buf + data).split(b"\n")
-        parsed = []
-        for raw in lines:
-            name, _, payload = raw.decode(errors="replace").partition(">>")
-            parsed.append((name, payload))
+    def _read_events(self) -> None:
+        """Drain the event socket on its own thread, never on the GTK loop.
+
+        Hyprland drops a listener that falls 64 events behind ("Socket2 fd N overflowed
+        event queue, removing"), and the GTK loop blocks for 5 s per hyprctl call that
+        times out. During a 70 s system stall on Oct 27 2026 a spinning Codex title
+        (~20 events/s) got the daemon dropped that way. Here the batches queue up in
+        memory until the loop is free again.
+        """
+        buf = b""  # a recv() can end mid-line (or mid UTF-8 sequence)
+        while True:
+            try:
+                data = self._sock.recv(65536)
+            except OSError as exc:
+                GLib.idle_add(self._lose, f"Hyprland event socket error: {exc}")
+                return
+            if not data:
+                GLib.idle_add(self._lose, "Hyprland event socket EOF")
+                return
+            *lines, buf = (buf + data).split(b"\n")
+            parsed = []
+            for raw in lines:
+                name, _, payload = raw.decode(errors="replace").partition(">>")
+                parsed.append((name, payload))
+            if not parsed:
+                continue
+            with self._lock:
+                idle = not self._queued  # else a _deliver is already scheduled and takes these too
+                self._queued.extend(parsed)
+            if idle:
+                GLib.idle_add(self._deliver, priority=GLib.PRIORITY_DEFAULT)
+
+    def _lose(self, why: str) -> bool:
+        log.error("%s; exiting with status 1 so systemd restarts us", why)
+        self.lost = why
+        Gtk.main_quit()
+        return False
+
+    def _deliver(self) -> bool:
+        with self._lock:
+            parsed, self._queued = self._queued, []
         events = {name for name, _ in parsed}
         if events & REFRESH_EVENTS and not self._pending:
             self._pending = True
             GLib.timeout_add(30, self.refresh)  # coalesce a burst into one hyprctl call
         if self.on_events is not None:
             self.on_events(parsed)
-        return True
+        return False  # one-shot: the reader thread schedules the next batch
 
 
 class Picker:
@@ -903,4 +928,5 @@ def run() -> int:
         return 1
     log.info("ready: global shortcuts hyprmeta:pick / hyprmeta:pick-move, socket %s", socket_path())
     Gtk.main()
-    return 0
+    # Restart=on-failure ignores a clean exit: a lost event socket must not look like `quit`.
+    return 1 if picker.cache.lost else 0

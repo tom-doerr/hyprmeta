@@ -49,7 +49,18 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
 - Menu protocol is dmenu-style (lines on stdin, chosen line on stdout, rc≠0 =
   cancel). Names must not contain tabs (the tab separates name from the
   workspace column in menu lines).
-- Run `python3 -m pytest` before committing.
+- **Daemon event socket (Oct 27 2026):** socket2 is read on its own thread
+  (`MonitorCache._read_events`), never on the GTK loop. Hyprland DROPS a listener
+  that falls 64 events behind (`Socket2 fd N overflowed event queue, removing` in
+  hyprland.log), and the GTK loop blocks 5 s per `hyprctl` call that times out; a
+  spinner title (~20 events/s) during a system stall got the daemon dropped. Batches
+  queue under a lock and reach the loop through one pending `_deliver` idle. A lost
+  socket sets `cache.lost` and `run()` returns 1: the unit is `Restart=on-failure`,
+  which ignores exit 0, so never let a socket loss exit 0 again (it left the picker
+  dead for good).
+- Run `python3 -m pytest` before committing. `tests/test_daemon.py` needs
+  pywayland and is skipped without it; run the full suite with the pipx venv's
+  python (`pipx environment --value PIPX_LOCAL_VENVS`/hyprmeta/bin/python).
 
 ## Agent tracking (`hyprmeta/agents.py`, run inside the daemon)
 
