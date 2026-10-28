@@ -58,6 +58,12 @@ class PreviewSession:
         if self.shown == old:
             self.shown = new
 
+    def removed(self, name: str) -> None:
+        """Meta `name` was deleted: if it is on screen, go back to the origin view."""
+        if self.shown == name:
+            self.app.show_workspaces(self.origin_ws)
+            self.shown = None
+
     def commit(self, name: str) -> list[int]:
         """Make `name` a real switch: shown (a no-op if already previewed) AND recorded."""
         self.closed = True

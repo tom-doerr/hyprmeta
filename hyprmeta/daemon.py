@@ -72,6 +72,7 @@ NAMESPACE = "hyprmeta"
 WIDTH = 560
 MAX_LIST_HEIGHT = 7 * 46
 SEARCH_ICON = "edit-find-symbolic"
+TRASH_ICON = "user-trash-symbolic"  # on rows of metas without windows: click = delete
 MARKS_GAP = 9  # px between the right-aligned marker column and the name (≈ one space)
 PLUS = "＋"  # sits in the marker column of the create / new rows
 RENAME_HINT = "ʀᴇɴᴀᴍᴇ “{}” · ᴇɴᴛᴇʀ sᴀᴠᴇs · ᴇsᴄ ɢᴏᴇs ʙᴀᴄᴋ"
@@ -81,6 +82,9 @@ EXTRA_CSS = b"""
 #hint, #hint-error { background-color: transparent; border: 1px solid transparent; padding: 4px 14px 0 14px; }
 #hint #text { color: rgba(255, 255, 255, 0.55); text-shadow: none; }
 #hint-error #text { color: #ff9e9e; text-shadow: none; }
+#trash { background: none; border: none; box-shadow: none; padding: 0 4px; min-height: 0; }
+#trash image { color: rgba(255, 255, 255, 0.45); }
+#trash:hover image { color: #ff9e9e; }
 """
 
 REFRESH_EVENTS = {
@@ -212,7 +216,8 @@ class Picker:
         self._renaming: str | None = None  # rename mode: the meta being renamed
         self._rename_return: str | None = None  # the meta selected when rename mode began
         self._rename_error: str | None = None  # shown in place of the hint until the next edit
-        self._scans = 0
+        self._pick_error: str | None = None  # a refused delete, atop the list until the next edit
+        self._scans = 0  # successful full scans; 0 = window counts unknown (no trash buttons)
         self._snapshot_due = True
         self._layout_sig: str | None = None
         self._instance: dict | None = None
@@ -276,10 +281,11 @@ class Picker:
         win.realize()  # build the surface now, not on the first keypress
 
     def _row(self, css_name: str, text: str, markup: bool = False, marks: str | None = None,
-             **meta: object) -> Gtk.ListBoxRow:
+             trash: bool = False, **meta: object) -> Gtk.ListBoxRow:
         """A list row. `marks` (Pango) goes in a right-aligned column LEFT of the text,
         sized by one SizeGroup per populate: each row's markers sit right against its
-        own name and the names still line up, whatever the glyph widths."""
+        own name and the names still line up, whatever the glyph widths. `trash` adds
+        a delete button at the right end (rows with marks only)."""
         row = Gtk.ListBoxRow()
         row.set_name(css_name)
         label = Gtk.Label()
@@ -300,6 +306,12 @@ class Picker:
             self._marks_group.add_widget(marks_label)
             box.pack_start(marks_label, False, False, 0)
             box.pack_start(label, True, True, 0)
+            if trash:
+                button = Gtk.Button.new_from_icon_name(TRASH_ICON, Gtk.IconSize.MENU)
+                button.set_name("trash")
+                button.set_can_focus(False)  # keys stay with the window handler / entry
+                button.connect("clicked", lambda b: self._delete(str(meta["name"])))
+                box.pack_end(button, False, False, 0)
             row.add(box)
         row.meta = meta  # type: ignore[attr-defined]
         if css_name in ("hint", "hint-error"):
@@ -324,6 +336,8 @@ class Picker:
             else:
                 self.list.add(self._row("hint", RENAME_HINT.format(self._renaming)))
         else:
+            if self._pick_error is not None:
+                self.list.add(self._row("hint-error", self._pick_error))
             width = max((len(n) for n, _, _ in self.rows), default=0) + 3
             scored = []
             for i, (name, age, summary) in enumerate(self.rows):
@@ -333,7 +347,10 @@ class Picker:
             scored.sort()
             self._matches = [name for _, _, name, _, _ in scored]
             for _, _, name, age, summary in scored:
-                self.list.add(self._row("entry", f"{name:<{width}}{age}", marks=marks_markup(summary), name=name))
+                # Only a meta the last scan saw with 0 windows; a missing count = no button.
+                empty = self._scans > 0 and summary.get("windows") == 0
+                self.list.add(self._row("entry", f"{name:<{width}}{age}", marks=marks_markup(summary),
+                                        trash=empty, name=name))
             q = query.strip()
             if q and not scored:  # nothing matches: Enter creates a meta with this name
                 self.list.add(self._row("entry", f"create “{q}”", marks=PLUS, create=q))
@@ -384,6 +401,7 @@ class Picker:
         self.previewing = preview and not move and on_grid
         self.mode = "pick"
         self.move = move
+        self._pick_error = None
         self._reset_entry()
         self._populate("")
         self.win.show()
@@ -700,9 +718,32 @@ class Picker:
         self._populate("", select=self._rename_return)
         self.win.set_focus(None)
 
+    # --------------------------------------------------------------- delete
+    def _delete(self, name: str) -> None:
+        """The trash button of an empty meta: forget it (windows were checked live)
+        and redraw the list, keeping the selection unless it was this meta."""
+        assert self.app is not None
+        selected = self._selected_meta()
+        try:
+            self.app.remove_empty(name)
+        except HyprmetaError as exc:
+            self._pick_error = str(exc)  # e.g. a window landed there since the last scan
+            self._populate(self.entry.get_text(), select=selected)
+            return
+        log.info("deleted empty meta %r", name)
+        self.rows = [r for r in self.rows if r[0] != name]
+        self._populate(self.entry.get_text(), select=selected if selected != name else None)
+        self._on_monitors(self.cache.monitors)  # agent tracking + waybar drop the name now
+        if self.session is not None:
+            try:
+                self.session.removed(name)  # it was previewed: back to the origin view
+            except HyprmetaError as exc:
+                log.error("cannot restore the workspaces: %s", exc)
+
     # ---------------------------------------------------------------- input
     def _on_changed(self, entry: Gtk.Entry) -> None:
         self._rename_error = None
+        self._pick_error = None
         self._populate(entry.get_text())
         self._arm_timer()
 

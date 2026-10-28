@@ -68,8 +68,14 @@ class Hypr:
     def __init__(self, run: Runner = _run_hyprctl) -> None:
         self._run = run
 
+    def _json(self, what: str):  # noqa: ANN202
+        # strict=False: Hyprland writes window titles into its JSON without
+        # escaping control characters, and one such title (it happens a few
+        # hundred times a day here) made every `clients` scan fail.
+        return json.loads(self._run(["-j", what]), strict=False)
+
     def monitors(self) -> list[Monitor]:
-        raw = json.loads(self._run(["-j", "monitors"]))
+        raw = self._json("monitors")
         mons = [
             Monitor(
                 name=m["name"],
@@ -84,21 +90,21 @@ class Hypr:
         return sorted(mons, key=lambda m: m.x)
 
     def clients(self) -> list[dict]:
-        return json.loads(self._run(["-j", "clients"]))
+        return self._json("clients")
 
     def workspace_monitors(self) -> dict[int, str]:
-        raw = json.loads(self._run(["-j", "workspaces"]))
+        raw = self._json("workspaces")
         return {int(w["id"]): w["monitor"] for w in raw}
 
     def _monitor_name(self, monitor_id: int) -> str:
         # clients / activewindow report the monitor ID; dispatchers want the name.
-        for m in json.loads(self._run(["-j", "monitors"])):
+        for m in self._json("monitors"):
             if int(m["id"]) == monitor_id:
                 return str(m["name"])
         raise HyprmetaError(f"window is on unknown monitor id {monitor_id}")
 
     def active_window_monitor(self) -> str:
-        raw = json.loads(self._run(["-j", "activewindow"]))
+        raw = self._json("activewindow")
         if not raw or "monitor" not in raw:
             raise HyprmetaError("no focused window")
         return self._monitor_name(int(raw["monitor"]))
@@ -592,6 +598,16 @@ class App:
         name = self.store.rename(old, new)
         self.store.save(self.store_file)
         return name
+
+    def remove_empty(self, name: str) -> None:
+        """Forget meta `name`, but only if none of its workspaces holds a window
+        right now (asked live: the picker's window counts can be seconds old)."""
+        wss = set(self.workspaces_for(self.store.offset(name)))
+        n = sum(1 for c in self.hypr.clients() if (c.get("workspace") or {}).get("id") in wss)
+        if n:
+            raise HyprmetaError(f"meta workspace {name!r} still has {n} window(s); not deleted")
+        self.store.remove(name)
+        self.store.save(self.store_file)
 
     # -- picker ------------------------------------------------------------ #
 

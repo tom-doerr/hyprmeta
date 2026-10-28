@@ -624,6 +624,35 @@ def test_renaming_the_previewed_meta_does_not_switch_again(tmp_path):
     assert len(fake.batches) == 1
 
 
+def test_a_title_with_a_raw_control_character_still_parses():
+    # Hyprland does not escape control characters in titles (Oct 2026: ~300 failed scans a day).
+    hypr = Hypr(lambda args: '[{"address": "0xw", "title": "spin\x1b[0m", "workspace": {"id": 6}}]')
+    assert hypr.clients()[0]["title"] == "spin\x1b[0m"
+
+
+def test_remove_empty_refuses_a_meta_with_windows(tmp_path):
+    store_file = tmp_path / "s.json"
+    fake = FakeHyprctl()
+    fake.clients = [{"address": "0xw", "workspace": {"id": 16}}, {"address": "0xs", "workspace": {"id": -98}}]
+    app = make_app(fake, store_file, {"home": 0, "taxes": 10, "legal": 30})
+    with pytest.raises(HyprmetaError, match="'taxes' still has 1 window"):
+        app.remove_empty("taxes")  # ws 16 = taxes' third monitor
+    app.remove_empty("legal")  # a special workspace (-98) belongs to no meta
+    assert Store.load(store_file).metas == {"home": 0, "taxes": 10}
+    with pytest.raises(HyprmetaError, match="unknown meta workspace 'legal'"):
+        app.remove_empty("legal")
+
+
+def test_deleting_the_previewed_meta_goes_back_to_the_origin_view(tmp_path):
+    fake, app, session = preview_world(tmp_path)
+    session.removed("taxes")  # not on screen: nothing to do
+    assert fake.batches == []
+    session.preview("legal")
+    session.removed("legal")
+    assert list(fake.active.values()) == [4, 5, 6]
+    assert session.shown is None
+
+
 def test_cancel_without_a_preview_does_nothing(tmp_path):
     fake, app, session = preview_world(tmp_path)
     session.cancel()

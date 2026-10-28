@@ -44,6 +44,16 @@ machine-specific detail (monitor descriptions, hostnames) OUT of this repo.
   again) and call `_on_monitors`, which publishes whenever `visible_state()`
   changed (meta names included), so waybar shows the new name at once. A refused
   name stays in rename mode with a `hint-error` row; never close on an error.
+- **Picker delete (user request, Oct 28 2026):** a trash button (`#trash`, mouse
+  only, `can_focus` off) on rows whose meta has `windows == 0` in the tracker's
+  `meta_summary`, and only after one successful full scan (`_scans > 0`: before it,
+  every meta reads 0). The click calls `App.remove_empty`, which re-checks with a
+  live `hyprctl clients` and refuses (red `hint-error` row atop the list) if a window
+  is there now. A deleted meta that is being previewed goes back to the origin view
+  (`PreviewSession.removed`). The current meta is not in the list, so it can't be deleted.
+- **`Hypr._json` parses with `strict=False`:** Hyprland writes titles into its JSON
+  with raw control characters; a strict parse failed ~300 `clients` scans a day
+  (Oct 26-28 2026), each one a scan the agent tracker missed.
 - `hyprctl activewindow` reports the monitor ID, `monitors` gives names; the
   ID→name join lives in `Hypr.active_window_monitor`.
 - Menu protocol is dmenu-style (lines on stdin, chosen line on stdout, rc≠0 =

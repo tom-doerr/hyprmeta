@@ -122,6 +122,12 @@ taken or invalid is shown in red, and you stay in the editor. Renaming is
 bookkeeping only: windows, workspaces, "last opened" and the remembered cursor
 spot carry over, and the waybar modules show the new name at once.
 
+**Deleting:** a meta with no windows on any of its workspaces gets a trash icon at
+the right end of its row; clicking it forgets that meta (the same as `hyprmeta
+remove`). The window count comes from the daemon's last scan (at most ~2 s old),
+and the click asks Hyprland again: if a window has landed there meanwhile, the
+meta is kept and the reason is shown in red above the list.
+
 Keyboard focus stays in the picker while it previews: Hyprland refuses window
 focus while an exclusive layer surface is open. On close it focuses the window
 under the cursor on the meta you chose, or your original window after Escape.
